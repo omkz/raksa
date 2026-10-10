@@ -999,11 +999,15 @@ def test_evaluate_verification_gate_matrix() -> None:
     gate_ok = evaluate_verification_gate(ok_static, ok_exploit, ok_reg, "docker")
     assert gate_ok.status == "verified"
     assert gate_ok.eligible_for_pr is True
+    assert "passed without errors" in gate_ok.message.lower()
+    assert "skipped" not in gate_ok.message.lower()
 
     # Skipped regression tests + passed exploit + passed static -> verified
     gate_skip = evaluate_verification_gate(ok_static, ok_exploit, skip_reg, "docker")
     assert gate_skip.status == "verified"
     assert gate_skip.eligible_for_pr is True
+    assert "regression tests were skipped" in gate_skip.message.lower()
+    assert "passed without errors" not in gate_skip.message.lower()
 
     # Unavailable exploit -> unverified
     gate_unavail = evaluate_verification_gate(ok_static, unavail_exploit, ok_reg, "docker")
@@ -1123,3 +1127,99 @@ def test_valid_inline_and_derived_exploit_tests() -> None:
     is_valid, msg = validate_security_exploit_test(VALID_INLINE_PAYLOAD_TEST, finding=finding, target_path="app.py")
     assert is_valid is True
     assert "valid" in msg.lower()
+
+
+@pytest.mark.asyncio
+async def test_verification_messaging_when_regression_tests_skipped() -> None:
+    """When no separate regression test suite exists, overall verification explicitly states regressions were skipped and preserves PR eligibility."""
+    files = {"app.py": VULNERABLE_SOURCE}
+    patched_files = {"app.py": FIXED_SOURCE}
+    findings = [{"id": "sqli-1", "path": "app.py", "line": 2}]
+
+    sandbox = DummySandbox(responses={
+        "test_raksa_exploit.py:before": {
+            "provider": "docker",
+            "status": "failed",
+            "exit_code": 1,
+            "stdout": "Ran 1 test in 0.01s\n\nFAILED (failures=1)\n",
+            "stderr": "FAIL: test_injection_blocked (test_raksa_exploit.SQLiExploitTest)\nTraceback (most recent call last):\n  File \"test_raksa_exploit.py\", line 9, in test_injection_blocked\n    self.assertEqual(len(rows), 0, \"SQL injection payload returned unintended rows\")\nAssertionError: 3 != 0 : SQL injection payload returned unintended rows",
+        },
+        "test_raksa_exploit.py:after": {
+            "provider": "docker",
+            "status": "passed",
+            "exit_code": 0,
+            "stdout": "Ran 1 test in 0.01s\n\nOK\n",
+            "stderr": "",
+        },
+    })
+    nebius = DummyNebius(exploit_test={
+        "path": "test_raksa_exploit.py",
+        "content": EXPLOIT_TEST_CONTENT,
+        "reason": "Targeted SQL injection test",
+    })
+
+    result = await verify_remediation(files, patched_files, findings, sandbox, nebius)
+
+    assert result.status == "verified"
+    assert result.eligible_for_pr is True
+    assert result.regression_tests.status == "skipped"
+    assert result.regression_tests.passed is False
+    assert "skipped" in result.regression_tests.message.lower()
+    assert "regression tests were skipped" in result.message.lower()
+    assert "passed without errors" not in result.message.lower()
+    assert result.as_dict()["regression_tests_passed"] is False
+    assert result.as_dict()["regression_tests"]["status"] == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_verification_messaging_when_regression_tests_passed() -> None:
+    """When preexisting regression test suite passes, overall verification explicitly states regressions passed without errors."""
+    files = {
+        "app.py": VULNERABLE_SOURCE,
+        "test_math.py": REGRESSION_TEST_CONTENT,
+    }
+    patched_files = {
+        "app.py": FIXED_SOURCE,
+        "test_math.py": REGRESSION_TEST_CONTENT,
+    }
+    findings = [{"id": "sqli-1", "path": "app.py", "line": 2}]
+
+    sandbox = DummySandbox(responses={
+        "test_raksa_exploit.py:before": {
+            "provider": "docker",
+            "status": "failed",
+            "exit_code": 1,
+            "stdout": "Ran 1 test in 0.01s\n\nFAILED (failures=1)\n",
+            "stderr": "FAIL: test_injection_blocked (test_raksa_exploit.SQLiExploitTest)\nTraceback (most recent call last):\n  File \"test_raksa_exploit.py\", line 9, in test_injection_blocked\n    self.assertEqual(len(rows), 0, \"SQL injection payload returned unintended rows\")\nAssertionError: 3 != 0 : SQL injection payload returned unintended rows",
+        },
+        "test_raksa_exploit.py:after": {
+            "provider": "docker",
+            "status": "passed",
+            "exit_code": 0,
+            "stdout": "Ran 1 test in 0.01s\n\nOK\n",
+            "stderr": "",
+        },
+        "default": {
+            "provider": "docker",
+            "status": "passed",
+            "exit_code": 0,
+            "stdout": "Ran 1 test in 0.01s\n\nOK\n",
+            "stderr": "",
+        },
+    })
+    nebius = DummyNebius(exploit_test={
+        "path": "test_raksa_exploit.py",
+        "content": EXPLOIT_TEST_CONTENT,
+        "reason": "Targeted SQL injection test",
+    })
+
+    result = await verify_remediation(files, patched_files, findings, sandbox, nebius)
+
+    assert result.status == "verified"
+    assert result.eligible_for_pr is True
+    assert result.regression_tests.status == "passed"
+    assert result.regression_tests.passed is True
+    assert "regression tests passed without errors" in result.message.lower()
+    assert "skipped" not in result.message.lower()
+    assert result.as_dict()["regression_tests_passed"] is True
+    assert result.as_dict()["regression_tests"]["status"] == "passed"

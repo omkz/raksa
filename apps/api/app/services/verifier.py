@@ -998,10 +998,26 @@ def evaluate_verification_gate(
         )
 
     # All required checks passed!
+    if regression_tests.status == "skipped":
+        overall_message = (
+            "All mandatory verification checks passed: static recheck cleared and differential "
+            "exploit verification proved mitigation. Preexisting regression tests were skipped "
+            "(no separate regression test suite detected in repository snapshot)."
+        )
+    else:
+        overall_message = (
+            "All verification checks passed: static recheck cleared, differential exploit verification "
+            "proved mitigation, and preexisting regression tests passed without errors."
+        )
+
+    gate_details = dict(details or {})
+    if regression_tests.status == "skipped":
+        gate_details["regression_tests_status"] = "skipped"
+
     return VerificationGateResult(
         status="verified",
         eligible_for_pr=True,
-        message="All verification checks passed: static recheck cleared, differential exploit verification proved mitigation, and regression tests passed without errors.",
+        message=overall_message,
         sandbox_provider=sandbox_provider,
         static_recheck=static_recheck,
         security_exploit=security_exploit,
@@ -1009,7 +1025,7 @@ def evaluate_verification_gate(
         tests=tests,
         before=before,
         after=after,
-        details=details,
+        details=gate_details,
     )
 
 
@@ -1083,8 +1099,8 @@ async def verify_remediation(
             regression_tests = VerificationCheck(
                 name="regression_tests",
                 status="skipped",
-                passed=True,
-                message="No separate regression test suite detected in repository snapshot.",
+                passed=False,
+                message="Regression tests skipped: no separate regression test suite detected in repository snapshot.",
                 details={"test_files": []},
             )
         else:
@@ -1136,8 +1152,8 @@ async def verify_remediation(
                 regression_tests = VerificationCheck(
                     name="regression_tests",
                     status="skipped",
-                    passed=True,
-                    message="No separate regression test suite detected in repository snapshot.",
+                    passed=False,
+                    message="Regression tests skipped: no separate regression test suite detected in repository snapshot.",
                     details={"test_files": []},
                 )
             else:
@@ -1358,8 +1374,8 @@ async def verify_remediation(
         regression_tests = VerificationCheck(
             name="regression_tests",
             status="skipped",
-            passed=True,
-            message="No separate regression test suite detected in repository snapshot.",
+            passed=False,
+            message="Regression tests skipped: no separate regression test suite detected in repository snapshot.",
             details={"test_files": []},
         )
     else:
