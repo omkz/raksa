@@ -1,0 +1,13 @@
+.env
+*.pem
+*.key
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+node_modules/
+dist/
+coverage.xml
+*.egg-info/
+.DS_Store

@@ -1,0 +1,29 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: ops/Dockerfile.api
+    env_file: .env
+    environment:
+      FRONTEND_URL: http://localhost:5173
+      CORS_ORIGINS: http://localhost:5173
+    volumes:
+      - ./apps/api:/app/apps/api
+      - ./examples:/app/examples:ro
+      - ./.env:/app/.env:ro
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  web:
+    build:
+      context: .
+      dockerfile: ops/Dockerfile.web
+    environment:
+      VITE_API_PROXY_TARGET: http://api:8000
+    volumes:
+      - ./apps/web:/app/apps/web
+      - /app/apps/web/node_modules
+    ports:
+      - "127.0.0.1:5173:5173"
+    depends_on:
+      - api
