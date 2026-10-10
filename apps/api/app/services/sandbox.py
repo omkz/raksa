@@ -1,6 +1,7 @@
 import asyncio
 import io
 import os
+import shlex
 import shutil
 import subprocess
 import tarfile
@@ -42,7 +43,13 @@ def archive_files(files: dict[str, str]) -> bytes:
 
 
 class SandboxService:
-    async def run_tests(self, files: dict[str, str], *, timeout_seconds: int | None = None) -> dict[str, Any]:
+    async def run_tests(
+        self,
+        files: dict[str, str],
+        *,
+        timeout_seconds: int | None = None,
+        test_pattern: str | None = None,
+    ) -> dict[str, Any]:
         provider = settings.sandbox_provider.strip().lower()
         timeout = max(15, min(timeout_seconds or settings.sandbox_timeout_seconds, 900))
         if provider == "demo":
@@ -55,12 +62,12 @@ class SandboxService:
                 "message": "Repository tests were not executed. Set SANDBOX_PROVIDER=nebius or docker to enable isolated test execution.",
             }
         if provider == "docker":
-            return await asyncio.to_thread(self._run_docker, files, timeout)
+            return await asyncio.to_thread(self._run_docker, files, timeout, test_pattern)
         if provider == "nebius":
-            return await self._run_nebius(files, timeout)
+            return await self._run_nebius(files, timeout, test_pattern)
         raise SandboxError(f"Unsupported SANDBOX_PROVIDER: {provider}")
 
-    def _run_docker(self, files: dict[str, str], timeout: int) -> dict[str, Any]:
+    def _run_docker(self, files: dict[str, str], timeout: int, test_pattern: str | None = None) -> dict[str, Any]:
         """Run a fixed test command in a no-network Docker container; never invokes a repo-provided shell command."""
         if not shutil.which("docker"):
             raise SandboxError("Docker CLI was not found. Install Docker or use the Nebius Sandbox provider.")
@@ -76,12 +83,14 @@ class SandboxService:
                 target = Path(workspace).joinpath(*PurePosixPath(path).parts)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(content, encoding="utf-8")
+            pattern_args = ["-p", test_pattern] if test_pattern and _safe_path(test_pattern) else []
             command = [
                 "docker", "run", "--rm", "--network", "none", "--memory", "512m", "--cpus", "1",
                 "--pids-limit", "128", "--ulimit", "nofile=1024:1024", "--cap-drop=ALL", "--security-opt=no-new-privileges:true",
                 "--user", "65534:65534", "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
                 "-e", "PYTHONDONTWRITEBYTECODE=1", "-v", f"{workspace}:/workspace:ro",
                 "-w", "/workspace", "python:3.12-slim", "python", "-m", "unittest", "discover", "-v",
+                *pattern_args,
             ]
             try:
                 result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
@@ -98,7 +107,7 @@ class SandboxService:
         finally:
             root.cleanup()
 
-    async def _run_nebius(self, files: dict[str, str], timeout: int) -> dict[str, Any]:
+    async def _run_nebius(self, files: dict[str, str], timeout: int, test_pattern: str | None = None) -> dict[str, Any]:
         if not settings.nebius_api_key:
             raise SandboxError("NEBIUS_API_KEY is required for the Nebius Sandbox provider.")
         archive = archive_files(files)
@@ -118,7 +127,8 @@ class SandboxService:
             if not file_id:
                 raise SandboxError("Nebius Sandbox upload returned no file identifier; inspect API response schema.")
 
-            shell_command = "mkdir -p /workspace && tar -xzf /tmp/raksa-repo.tar.gz -C /workspace && cd /workspace && python -m unittest discover -v"
+            pattern_clause = f" -p {shlex.quote(test_pattern)}" if test_pattern and _safe_path(test_pattern) else ""
+            shell_command = f"mkdir -p /workspace && tar -xzf /tmp/raksa-repo.tar.gz -C /workspace && cd /workspace && python -m unittest discover -v{pattern_clause}"
             payload = {
                 "image": "tag:ubuntu:latest",
                 "files": [file_id],

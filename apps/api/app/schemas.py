@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -39,6 +39,31 @@ class PatchProposal(BaseModel):
     old_text: str
     new_text: str
     reason: str
+
+
+class VerificationCheckSchema(BaseModel):
+    name: str
+    status: Literal["passed", "failed", "unverified", "error", "skipped", "unavailable", "not_run"]
+    passed: bool
+    message: str
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class VerificationEvidenceSchema(BaseModel):
+    status: Literal["verified", "unverified", "failed", "error"]
+    eligible_for_pr: bool
+    message: str
+    sandbox_provider: str
+    static_recheck: VerificationCheckSchema
+    security_exploit: VerificationCheckSchema
+    regression_tests: VerificationCheckSchema
+    static_recheck_passed: bool = False
+    security_exploit_passed: bool = False
+    regression_tests_passed: bool = False
+    tests: dict[str, Any] | None = None
+    before: dict[str, Any] | None = None
+    after: dict[str, Any] | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
 
 
 class ScanResult(BaseModel):

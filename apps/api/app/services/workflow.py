@@ -6,8 +6,9 @@ from app.config import settings
 from app.services.analyzer import apply_exact_replacements, detect_sql_injection
 from app.services.github_app import github_app
 from app.services.nebius import NebiusUnavailable, nebius
-from app.services.sandbox import SandboxError, sandbox
+from app.services.sandbox import sandbox
 from app.services.tavily import tavily
+from app.services.verifier import verify_remediation
 from app.state import update_job
 
 
@@ -83,36 +84,47 @@ async def run_scan_job(scan_id: str, installation_id: str, full_name: str) -> No
         }
 
         if changed_files:
-            await update_job(scan_id, stage="verifying", message=f"Rechecking the proposed patch and running tests via {settings.sandbox_provider}…")
-            remaining_findings = detect_sql_injection(patched_files, max_findings=settings.max_findings)
-            original_paths = {item["path"] for item in findings}
-            remaining = [item for item in remaining_findings if item["path"] in original_paths]
-            static_clear = len(remaining) == 0
-            try:
-                test_result = await sandbox.run_tests(patched_files)
-            except SandboxError as exc:
-                test_result = {"provider": settings.sandbox_provider, "status": "error", "exit_code": None,
-                               "stdout": "", "stderr": str(exc), "message": str(exc)}
-            tests_ran = _tests_ran(test_result)
-            tests_passed = test_result.get("status") == "passed" and tests_ran
-            verified = static_clear and tests_passed
-            verification = {
-                "status": "verified" if verified else ("tests_failed" if test_result.get("status") == "failed" else "unverified"),
-                "sandbox_provider": settings.sandbox_provider,
-                "static_recheck_passed": static_clear,
-                "remaining_findings": remaining,
-                "tests": test_result,
-                "tests_ran": tests_ran,
-                "message": (
-                    "Static heuristic no longer flags the original path and at least one test ran successfully in the sandbox. "
-                    "This is not proof against every exploit; review the diff and security context."
-                    if verified else
-                    "Verification is incomplete. A PR is disabled until the static recheck clears and at least one test passes in an enabled sandbox."
-                ),
-                "eligible_for_pr": verified,
-            }
+            await update_job(scan_id, stage="verifying", message=f"Running security verification gate via {settings.sandbox_provider}…")
+            gate_result = await verify_remediation(
+                files=files,
+                patched_files=patched_files,
+                findings=findings,
+                sandbox_service=sandbox,
+                nebius_service=nebius,
+            )
+            verification = gate_result.as_dict()
         else:
-            verification["message"] = "No validated patch was prepared. Configure Nebius and inspect the model proposal details before proceeding."
+            verification = {
+                "status": "unverified",
+                "sandbox_provider": settings.sandbox_provider,
+                "static_recheck_passed": False,
+                "security_exploit_passed": False,
+                "regression_tests_passed": False,
+                "static_recheck": {
+                    "name": "static_recheck",
+                    "status": "not_run",
+                    "passed": False,
+                    "message": "No patch was prepared to recheck.",
+                    "details": {},
+                },
+                "security_exploit": {
+                    "name": "security_exploit_test",
+                    "status": "not_run",
+                    "passed": False,
+                    "message": "No patch was prepared to test.",
+                    "details": {},
+                },
+                "regression_tests": {
+                    "name": "regression_tests",
+                    "status": "not_run",
+                    "passed": False,
+                    "message": "No patch was prepared to test.",
+                    "details": {},
+                },
+                "tests": None,
+                "message": "No validated patch was prepared. Configure Nebius and inspect the model proposal details before proceeding.",
+                "eligible_for_pr": False,
+            }
 
         await update_job(
             scan_id, status="completed", stage="complete", message="Analysis finished.",
