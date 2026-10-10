@@ -5,6 +5,7 @@ import pytest
 from app.services.sandbox import SandboxError
 from app.services.verifier import (
     VerificationCheck,
+    classify_test_result,
     evaluate_verification_gate,
     find_existing_security_test,
     run_static_recheck,
@@ -36,9 +37,16 @@ class SQLiExploitTest(unittest.TestCase):
 
 
 class DummySandbox:
-    def __init__(self, responses: dict[str, Any] | None = None, error: Exception | None = None, provider: str = "docker"):
+    def __init__(
+        self,
+        responses: dict[str, Any] | None = None,
+        error: Exception | None = None,
+        errors: dict[str, Exception] | None = None,
+        provider: str = "docker",
+    ):
         self.responses = responses or {}
         self.error = error
+        self.errors = errors or {}
         self.provider = provider
         self.calls: list[dict[str, Any]] = []
 
@@ -52,8 +60,25 @@ class DummySandbox:
         self.calls.append({"files": files, "pattern": test_pattern})
         if self.error:
             raise self.error
+
+        phase = "before" if files.get("app.py") == VULNERABLE_SOURCE else "after"
+
+        if test_pattern and f"{test_pattern}:{phase}" in self.errors:
+            raise self.errors[f"{test_pattern}:{phase}"]
+        if phase in self.errors:
+            raise self.errors[phase]
+
+        if test_pattern and f"{test_pattern}:{phase}" in self.responses:
+            return self.responses[f"{test_pattern}:{phase}"]
+        if (test_pattern, phase) in self.responses:
+            return self.responses[(test_pattern, phase)]
         if test_pattern and test_pattern in self.responses:
-            return self.responses[test_pattern]
+            resp = self.responses[test_pattern]
+            if isinstance(resp, list):
+                return resp.pop(0) if resp else self.responses.get("default", {})
+            return resp
+        if phase in self.responses:
+            return self.responses[phase]
         if "default" in self.responses:
             return self.responses["default"]
         return {
@@ -77,7 +102,7 @@ class DummyNebius:
 
 @pytest.mark.asyncio
 async def test_successful_verification() -> None:
-    """When static recheck passes, exploit test passes, and regression tests pass, status is verified and PR is allowed."""
+    """When static recheck passes, exploit reproduces before and passes after, status is verified and PR is allowed."""
     files = {
         "app.py": VULNERABLE_SOURCE,
         "test_math.py": REGRESSION_TEST_CONTENT,
@@ -96,7 +121,14 @@ async def test_successful_verification() -> None:
     }]
 
     sandbox = DummySandbox(responses={
-        "test_raksa_exploit.py": {
+        "test_raksa_exploit.py:before": {
+            "provider": "docker",
+            "status": "failed",
+            "exit_code": 1,
+            "stdout": "Ran 1 test in 0.01s\n\nFAILED (failures=1)\n",
+            "stderr": "FAIL: test_exploit\nAssertionError: SQL injection payload altered query semantics",
+        },
+        "test_raksa_exploit.py:after": {
             "provider": "docker",
             "status": "passed",
             "exit_code": 0,
@@ -127,11 +159,13 @@ async def test_successful_verification() -> None:
     assert result.security_exploit.status == "passed"
     assert result.regression_tests.passed is True
     assert result.regression_tests.status == "passed"
+    assert result.before is not None and result.before["exploit_reproduced"] is True
+    assert result.after is not None and result.after["exploit_blocked"] is True
 
 
 @pytest.mark.asyncio
 async def test_failed_exploit_verification() -> None:
-    """When security exploit test fails, remediation is marked failed and PR creation is disallowed."""
+    """When security exploit test fails against patched code, remediation is marked failed and PR is disallowed."""
     files = {
         "app.py": VULNERABLE_SOURCE,
         "test_math.py": REGRESSION_TEST_CONTENT,
@@ -143,7 +177,14 @@ async def test_failed_exploit_verification() -> None:
     findings = [{"id": "sqli-1", "path": "app.py", "line": 2}]
 
     sandbox = DummySandbox(responses={
-        "test_raksa_exploit.py": {
+        "test_raksa_exploit.py:before": {
+            "provider": "docker",
+            "status": "failed",
+            "exit_code": 1,
+            "stdout": "Ran 1 test in 0.01s\n\nFAILED (failures=1)\n",
+            "stderr": "FAIL: test_exploit\nAssertionError: SQL injection payload altered query semantics",
+        },
+        "test_raksa_exploit.py:after": {
             "provider": "docker",
             "status": "failed",
             "exit_code": 1,
@@ -187,7 +228,14 @@ async def test_failed_regression_tests() -> None:
     findings = [{"id": "sqli-1", "path": "app.py", "line": 2}]
 
     sandbox = DummySandbox(responses={
-        "test_raksa_exploit.py": {
+        "test_raksa_exploit.py:before": {
+            "provider": "docker",
+            "status": "failed",
+            "exit_code": 1,
+            "stdout": "Ran 1 test in 0.01s\n\nFAILED (failures=1)\n",
+            "stderr": "FAIL: test_exploit\nAssertionError: SQL injection reproduced",
+        },
+        "test_raksa_exploit.py:after": {
             "provider": "docker",
             "status": "passed",
             "exit_code": 0,
@@ -252,7 +300,7 @@ async def test_unavailable_security_tests_reports_unverified() -> None:
     """
     files = {
         "app.py": VULNERABLE_SOURCE,
-        "test_math.py": REGRESSION_TEST_CONTENT,  # Unrelated passing test
+        "test_math.py": REGRESSION_TEST_CONTENT,
     }
     patched_files = {
         "app.py": FIXED_SOURCE,
@@ -260,7 +308,6 @@ async def test_unavailable_security_tests_reports_unverified() -> None:
     }
     findings = [{"id": "sqli-1", "path": "app.py", "line": 2}]
 
-    # Unrelated tests pass successfully
     sandbox = DummySandbox(responses={
         "default": {
             "provider": "docker",
@@ -270,7 +317,6 @@ async def test_unavailable_security_tests_reports_unverified() -> None:
             "stderr": "",
         }
     })
-    # Nebius is not configured / cannot generate test
     nebius = DummyNebius(exploit_test=None, configured=False)
 
     result = await verify_remediation(files, patched_files, findings, sandbox, nebius)
@@ -279,15 +325,365 @@ async def test_unavailable_security_tests_reports_unverified() -> None:
     assert result.eligible_for_pr is False
     assert result.security_exploit.status == "unavailable"
     assert result.security_exploit.passed is False
-    # Regression tests passed, but that is NOT treated as proof of fix
     assert result.regression_tests.passed is True
     assert "passing unrelated tests does not prove" in result.message.lower()
+
+
+@pytest.mark.asyncio
+async def test_differential_successful_verification() -> None:
+    """Requirement 7: Successful differential verification records proof and allows PR."""
+    files = {
+        "app.py": VULNERABLE_SOURCE,
+        "test_math.py": REGRESSION_TEST_CONTENT,
+    }
+    patched_files = {
+        "app.py": FIXED_SOURCE,
+        "test_math.py": REGRESSION_TEST_CONTENT,
+    }
+    findings = [{"id": "sqli-1", "path": "app.py", "line": 2}]
+
+    sandbox = DummySandbox(responses={
+        "test_raksa_exploit.py:before": {
+            "provider": "docker",
+            "status": "failed",
+            "exit_code": 1,
+            "stdout": "Ran 1 test in 0.01s\n\nFAILED (failures=1)\n",
+            "stderr": "FAIL: test_injection_blocked\nAssertionError: 3 != 0 : Exploit payload altered query",
+        },
+        "test_raksa_exploit.py:after": {
+            "provider": "docker",
+            "status": "passed",
+            "exit_code": 0,
+            "stdout": "Ran 1 test in 0.01s\n\nOK\n",
+            "stderr": "",
+        },
+        "default": {
+            "provider": "docker",
+            "status": "passed",
+            "exit_code": 0,
+            "stdout": "Ran 1 test in 0.01s\n\nOK\n",
+            "stderr": "",
+        },
+    })
+    nebius = DummyNebius(exploit_test={
+        "path": "test_raksa_exploit.py",
+        "content": EXPLOIT_TEST_CONTENT,
+        "reason": "Test injection blocked",
+    })
+
+    result = await verify_remediation(files, patched_files, findings, sandbox, nebius)
+
+    assert result.status == "verified"
+    assert result.eligible_for_pr is True
+    assert result.before is not None
+    assert result.before["exploit_reproduced"] is True
+    assert result.before["outcome"] == "assertion_failure"
+    assert result.after is not None
+    assert result.after["exploit_blocked"] is True
+    assert result.after["outcome"] == "passed"
+
+
+@pytest.mark.asyncio
+async def test_differential_original_test_unexpectedly_passing() -> None:
+    """Requirement 7: If the original test unexpectedly passes, vulnerability was not reproduced.
+
+    Remediation is marked unverified and PR creation is prevented.
+    """
+    files = {
+        "app.py": VULNERABLE_SOURCE,
+        "test_math.py": REGRESSION_TEST_CONTENT,
+    }
+    patched_files = {
+        "app.py": FIXED_SOURCE,
+        "test_math.py": REGRESSION_TEST_CONTENT,
+    }
+    findings = [{"id": "sqli-1", "path": "app.py", "line": 2}]
+
+    sandbox = DummySandbox(responses={
+        "test_raksa_exploit.py:before": {
+            "provider": "docker",
+            "status": "passed",
+            "exit_code": 0,
+            "stdout": "Ran 1 test in 0.01s\n\nOK\n",
+            "stderr": "",
+        },
+        "test_raksa_exploit.py:after": {
+            "provider": "docker",
+            "status": "passed",
+            "exit_code": 0,
+            "stdout": "Ran 1 test in 0.01s\n\nOK\n",
+            "stderr": "",
+        },
+        "default": {
+            "provider": "docker",
+            "status": "passed",
+            "exit_code": 0,
+            "stdout": "Ran 1 test in 0.01s\n\nOK\n",
+            "stderr": "",
+        },
+    })
+    nebius = DummyNebius(exploit_test={
+        "path": "test_raksa_exploit.py",
+        "content": EXPLOIT_TEST_CONTENT,
+        "reason": "Test exploit",
+    })
+
+    result = await verify_remediation(files, patched_files, findings, sandbox, nebius)
+
+    assert result.status == "unverified"
+    assert result.eligible_for_pr is False
+    assert result.security_exploit.status == "unverified"
+    assert result.security_exploit.passed is False
+    assert result.before is not None and result.before["exploit_reproduced"] is False
+    assert "unexpectedly passed" in result.message.lower() or "not reproduced" in result.message.lower()
+
+
+@pytest.mark.asyncio
+async def test_differential_patched_test_failing() -> None:
+    """Requirement 7: Patched test failing marks verification failed and prevents PR."""
+    files = {
+        "app.py": VULNERABLE_SOURCE,
+        "test_math.py": REGRESSION_TEST_CONTENT,
+    }
+    patched_files = {
+        "app.py": FIXED_SOURCE,
+        "test_math.py": REGRESSION_TEST_CONTENT,
+    }
+    findings = [{"id": "sqli-1", "path": "app.py", "line": 2}]
+
+    sandbox = DummySandbox(responses={
+        "test_raksa_exploit.py:before": {
+            "provider": "docker",
+            "status": "failed",
+            "exit_code": 1,
+            "stdout": "Ran 1 test in 0.01s\n\nFAILED (failures=1)\n",
+            "stderr": "FAIL: test_exploit\nAssertionError: Vulnerability present",
+        },
+        "test_raksa_exploit.py:after": {
+            "provider": "docker",
+            "status": "failed",
+            "exit_code": 1,
+            "stdout": "Ran 1 test in 0.01s\n\nFAILED (failures=1)\n",
+            "stderr": "FAIL: test_exploit\nAssertionError: Patch failed to block payload",
+        },
+        "default": {
+            "provider": "docker",
+            "status": "passed",
+            "exit_code": 0,
+            "stdout": "Ran 1 test in 0.01s\n\nOK\n",
+            "stderr": "",
+        },
+    })
+    nebius = DummyNebius(exploit_test={
+        "path": "test_raksa_exploit.py",
+        "content": EXPLOIT_TEST_CONTENT,
+        "reason": "Test exploit",
+    })
+
+    result = await verify_remediation(files, patched_files, findings, sandbox, nebius)
+
+    assert result.status == "failed"
+    assert result.eligible_for_pr is False
+    assert result.security_exploit.status == "failed"
+    assert result.security_exploit.passed is False
+    assert result.after is not None and result.after["exploit_blocked"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "status", "exit_code", "expected_description"),
+    [
+        (
+            "Ran 1 test in 0.00s\n\nFAILED (errors=1)\n",
+            "ERROR: test_raksa_exploit (unittest.loader._FailedTest)\nImportError: Failed to import test module\nModuleNotFoundError: No module named 'nonexistent'",
+            "failed",
+            1,
+            "import error",
+        ),
+        (
+            "Ran 1 test in 0.00s\n\nFAILED (errors=1)\n",
+            "ERROR: test_raksa_exploit (unittest.loader._FailedTest)\nSyntaxError: invalid syntax",
+            "failed",
+            1,
+            "syntax error",
+        ),
+        (
+            "Ran 0 tests in 0.00s\n\nOK\n",
+            "",
+            "passed",
+            0,
+            "discovery error (0 tests)",
+        ),
+        (
+            "",
+            "Sandbox timeout reached.",
+            "timeout",
+            None,
+            "timeout",
+        ),
+        (
+            "Ran 1 test in 0.00s\n\nFAILED (errors=1)\n",
+            "ERROR: test_exploit\nTypeError: 'NoneType' object is not callable",
+            "failed",
+            1,
+            "unhandled runtime exception",
+        ),
+    ],
+)
+async def test_differential_assertion_versus_setup_errors(
+    stdout: str,
+    stderr: str,
+    status: str,
+    exit_code: int | None,
+    expected_description: str,
+) -> None:
+    """Requirement 4 & 7: Setup, import, discovery, timeouts, and unhandled errors must never count as proof of vulnerability."""
+    files = {
+        "app.py": VULNERABLE_SOURCE,
+        "test_math.py": REGRESSION_TEST_CONTENT,
+    }
+    patched_files = {
+        "app.py": FIXED_SOURCE,
+        "test_math.py": REGRESSION_TEST_CONTENT,
+    }
+    findings = [{"id": "sqli-1", "path": "app.py", "line": 2}]
+
+    sandbox = DummySandbox(responses={
+        "test_raksa_exploit.py:before": {
+            "provider": "docker",
+            "status": status,
+            "exit_code": exit_code,
+            "stdout": stdout,
+            "stderr": stderr,
+        },
+        "default": {
+            "provider": "docker",
+            "status": "passed",
+            "exit_code": 0,
+            "stdout": "Ran 1 test in 0.01s\n\nOK\n",
+            "stderr": "",
+        },
+    })
+    nebius = DummyNebius(exploit_test={
+        "path": "test_raksa_exploit.py",
+        "content": EXPLOIT_TEST_CONTENT,
+        "reason": "Test exploit",
+    })
+
+    result = await verify_remediation(files, patched_files, findings, sandbox, nebius)
+
+    assert result.status == "unverified", f"Expected unverified for {expected_description}"
+    assert result.eligible_for_pr is False
+    assert result.security_exploit.passed is False
+    assert result.security_exploit.status == "unverified"
+    assert result.before is not None
+    assert result.before["exploit_reproduced"] is False
+
+
+@pytest.mark.asyncio
+async def test_differential_sandbox_failures() -> None:
+    """Requirement 7: Sandbox errors during before or after execution return error and disable PR."""
+    files = {
+        "app.py": VULNERABLE_SOURCE,
+        "test_math.py": REGRESSION_TEST_CONTENT,
+    }
+    patched_files = {
+        "app.py": FIXED_SOURCE,
+        "test_math.py": REGRESSION_TEST_CONTENT,
+    }
+    findings = [{"id": "sqli-1", "path": "app.py", "line": 2}]
+    nebius = DummyNebius(exploit_test={
+        "path": "test_raksa_exploit.py",
+        "content": EXPLOIT_TEST_CONTENT,
+        "reason": "Test exploit",
+    })
+
+    # Case 1: Sandbox error on original snapshot
+    sandbox_before_err = DummySandbox(
+        errors={"test_raksa_exploit.py:before": SandboxError("Docker daemon terminated")}
+    )
+    res_before = await verify_remediation(files, patched_files, findings, sandbox_before_err, nebius)
+    assert res_before.status == "error"
+    assert res_before.eligible_for_pr is False
+    assert "sandbox error" in res_before.message.lower()
+
+    # Case 2: Sandbox error on patched snapshot
+    sandbox_after_err = DummySandbox(
+        responses={
+            "test_raksa_exploit.py:before": {
+                "provider": "docker",
+                "status": "failed",
+                "exit_code": 1,
+                "stdout": "Ran 1 test in 0.01s\n\nFAILED (failures=1)\n",
+                "stderr": "FAIL: test_exploit\nAssertionError: Reproduced",
+            },
+        },
+        errors={"test_raksa_exploit.py:after": SandboxError("Container out of memory")},
+    )
+    res_after = await verify_remediation(files, patched_files, findings, sandbox_after_err, nebius)
+    assert res_after.status == "error"
+    assert res_after.eligible_for_pr is False
+    assert "sandbox error" in res_after.message.lower()
+
+
+def test_classify_test_result_matrix() -> None:
+    """Unit test classification helper across various outputs."""
+    # 1. Assertion failure
+    r_assert = classify_test_result({
+        "status": "failed",
+        "exit_code": 1,
+        "stdout": "Ran 1 test in 0.01s\n\nFAILED (failures=1)\n",
+        "stderr": "FAIL: test_exploit\nAssertionError: Query was altered",
+    })
+    assert r_assert.outcome == "assertion_failure"
+    assert r_assert.is_assertion_failure is True
+    assert r_assert.is_passed is False
+
+    # 2. Module import error
+    r_import = classify_test_result({
+        "status": "failed",
+        "exit_code": 1,
+        "stdout": "Ran 1 test in 0.00s\n\nFAILED (errors=1)\n",
+        "stderr": "ERROR: test_raksa_exploit (unittest.loader._FailedTest)\nImportError: cannot import name 'target'",
+    })
+    assert r_import.outcome == "setup_error"
+    assert r_import.is_assertion_failure is False
+
+    # 3. Timeout
+    r_timeout = classify_test_result({
+        "status": "timeout",
+        "exit_code": None,
+        "stdout": "",
+        "stderr": "Sandbox timeout reached.",
+    })
+    assert r_timeout.outcome == "timeout"
+    assert r_timeout.is_assertion_failure is False
+
+    # 4. Zero tests ran
+    r_zero = classify_test_result({
+        "status": "passed",
+        "exit_code": 0,
+        "stdout": "Ran 0 tests in 0.00s\n\nOK\n",
+        "stderr": "",
+    })
+    assert r_zero.outcome == "no_tests_ran"
+    assert r_zero.is_assertion_failure is False
+
+    # 5. Passed test
+    r_pass = classify_test_result({
+        "status": "passed",
+        "exit_code": 0,
+        "stdout": "Ran 1 test in 0.01s\n\nOK\n",
+        "stderr": "",
+    })
+    assert r_pass.outcome == "passed"
+    assert r_pass.is_passed is True
+    assert r_pass.is_assertion_failure is False
 
 
 def test_static_recheck_fails_if_vulnerability_remains() -> None:
     """Static recheck fails if vulnerable SQL pattern still exists on the target path."""
     original_findings = [{"id": "sqli-1", "path": "app.py", "line": 2}]
-    # Patched files still contain string formatting SQL query
     patched_files = {"app.py": VULNERABLE_SOURCE}
 
     check = run_static_recheck(original_findings, patched_files)
@@ -316,6 +712,8 @@ def test_evaluate_verification_gate_matrix() -> None:
     ok_exploit = VerificationCheck("security_exploit_test", "passed", True, "ok", {})
     fail_exploit = VerificationCheck("security_exploit_test", "failed", False, "failed", {})
     unavail_exploit = VerificationCheck("security_exploit_test", "unavailable", False, "unavailable", {})
+    unverified_exploit = VerificationCheck("security_exploit_test", "unverified", False, "unverified", {})
+    error_exploit = VerificationCheck("security_exploit_test", "error", False, "error", {})
 
     ok_reg = VerificationCheck("regression_tests", "passed", True, "ok", {})
     fail_reg = VerificationCheck("regression_tests", "failed", False, "failed", {})
@@ -335,6 +733,16 @@ def test_evaluate_verification_gate_matrix() -> None:
     gate_unavail = evaluate_verification_gate(ok_static, unavail_exploit, ok_reg, "docker")
     assert gate_unavail.status == "unverified"
     assert gate_unavail.eligible_for_pr is False
+
+    # Unverified exploit -> unverified
+    gate_unver = evaluate_verification_gate(ok_static, unverified_exploit, ok_reg, "docker")
+    assert gate_unver.status == "unverified"
+    assert gate_unver.eligible_for_pr is False
+
+    # Error exploit -> error
+    gate_err = evaluate_verification_gate(ok_static, error_exploit, ok_reg, "docker")
+    assert gate_err.status == "error"
+    assert gate_err.eligible_for_pr is False
 
     # Failed exploit -> failed
     gate_fail_exp = evaluate_verification_gate(ok_static, fail_exploit, ok_reg, "docker")
