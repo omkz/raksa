@@ -1,3 +1,4 @@
+import ast
 import re
 from dataclasses import asdict, dataclass
 from typing import Any, Literal
@@ -5,6 +6,34 @@ from typing import Any, Literal
 from app.config import settings
 from app.services.analyzer import detect_sql_injection
 from app.services.sandbox import SandboxError
+
+SQLI_PAYLOAD_PATTERNS = [
+    r"['\"]\s*or\s+['\"\d\w]",
+    r"\bor\s+['\"]?\d+['\"]?\s*=\s*['\"]?\d+['\"]?",
+    r"['\"]\s*or\s+true\b",
+    r"['\"]\s*or\s+false\b",
+    r"['\"]\s*and\s+['\"\d\w]",
+    r"\bunion\s+(?:all\s+)?select\b",
+    r"['\"].*--",
+    r"--\s*$",
+    r"['\"]\s*;",
+    r";\s*(?:drop|select|insert|update|delete)\b",
+    r"/\*.*\*/",
+    r"['\"]\s*#",
+]
+
+SECURITY_KEYWORDS = {
+    "payload", "injection", "sqli", "exploit", "vulnerab",
+    "parameteriz", "query", "unintended", "leak", "bypass",
+    "rows", "result", "record", "user", "data", "count",
+    "cwe", "security", "blocked", "database", "db", "fetch",
+}
+
+BUILTIN_FUNCS = {
+    "len", "str", "int", "float", "bool", "list", "dict", "set", "tuple",
+    "range", "type", "isinstance", "print", "repr", "iter", "next",
+    "min", "max", "sum", "any", "all", "enumerate", "zip", "filter", "map",
+}
 
 
 @dataclass
@@ -138,7 +167,591 @@ def tests_ran(result: dict[str, Any]) -> bool:
     )
 
 
-def classify_test_result(result: dict[str, Any]) -> TestClassification:
+def is_sqli_payload_str(s: str) -> bool:
+    """Check if a string matches SQL injection payload heuristics."""
+    if not isinstance(s, str):
+        return False
+    s_lower = s.strip().lower()
+    return (
+        "' or " in s_lower
+        or '" or ' in s_lower
+        or "' and " in s_lower
+        or '" and ' in s_lower
+        or "1=1" in s_lower
+        or "'1'='1'" in s_lower
+        or "union select" in s_lower
+        or "union all select" in s_lower
+        or "--" in s_lower
+        or "/*" in s_lower
+        or any(re.search(pat, s_lower) for pat in SQLI_PAYLOAD_PATTERNS)
+    )
+
+
+def has_relevant_sqli_payload(tree: ast.AST, content: str) -> bool:
+    """Check if the test code contains a recognized SQL injection payload."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if is_sqli_payload_str(node.value):
+                return True
+
+    content_lower = content.lower()
+    return any(
+        kw in content_lower
+        for kw in ["' or 1=1", '" or 1=1', "' or '1'='1", "union select", "' or true", "admin' --", "' or ''='"]
+    )
+
+
+def check_trivial_assertions(tree: ast.AST) -> tuple[bool, str]:
+    """Check if test relies on trivial assertions like assertTrue(False) or assertEqual(1, 2)."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            attr = node.func.attr
+            if attr == "assertTrue" and node.args:
+                arg = node.args[0]
+                if isinstance(arg, ast.Constant) and arg.value is False:
+                    return True, "trivial assertion assertTrue(False)"
+            elif attr == "assertFalse" and node.args:
+                arg = node.args[0]
+                if isinstance(arg, ast.Constant) and arg.value is True:
+                    return True, "trivial assertion assertFalse(True)"
+            elif attr == "assertEqual" and len(node.args) >= 2:
+                a1, a2 = node.args[0], node.args[1]
+                if isinstance(a1, ast.Constant) and isinstance(a2, ast.Constant) and a1.value != a2.value:
+                    return True, f"trivial assertion assertEqual({a1.value!r}, {a2.value!r})"
+            elif attr == "assertNotEqual" and len(node.args) >= 2:
+                a1, a2 = node.args[0], node.args[1]
+                if isinstance(a1, ast.Constant) and isinstance(a2, ast.Constant) and a1.value == a2.value:
+                    return True, f"trivial assertion assertNotEqual({a1.value!r}, {a2.value!r})"
+        elif isinstance(node, ast.Assert):
+            if isinstance(node.test, ast.Constant) and node.test.value is False:
+                return True, "trivial assertion assert False"
+            if isinstance(node.test, ast.Compare):
+                left = node.test.left
+                comparators = node.test.comparators
+                if (
+                    isinstance(left, ast.Constant)
+                    and len(comparators) == 1
+                    and isinstance(comparators[0], ast.Constant)
+                    and left.value != comparators[0].value
+                ):
+                    return True, f"trivial assertion comparing constants ({left.value!r} vs {comparators[0].value!r})"
+    return False, ""
+
+
+def has_meaningful_assertions(tree: ast.AST) -> bool:
+    """Ensure the test contains at least one non-trivial assertion."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assert):
+            if not (isinstance(node.test, ast.Constant) and node.test.value is False):
+                return True
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            attr = node.func.attr
+            if attr.startswith("assert"):
+                if attr in {"assertTrue", "assertFalse"} and node.args:
+                    if not isinstance(node.args[0], ast.Constant):
+                        return True
+                elif attr in {"assertEqual", "assertNotEqual", "assertIn", "assertNotIn"}:
+                    if len(node.args) >= 2:
+                        if not (isinstance(node.args[0], ast.Constant) and isinstance(node.args[1], ast.Constant)):
+                            return True
+                elif attr == "assertRaises":
+                    return True
+                else:
+                    return True
+        elif isinstance(node, ast.With):
+            for item in node.items:
+                if isinstance(item.context_expr, ast.Call) and isinstance(item.context_expr.func, ast.Attribute):
+                    if "assert" in item.context_expr.func.attr.lower():
+                        return True
+    return False
+
+
+def exercises_target_code(
+    tree: ast.AST,
+    content: str,
+    target_path: str | None = None,
+    finding: dict[str, Any] | None = None,
+) -> bool:
+    """Verify that the exploit test imports or calls into the target code."""
+    candidate_names: set[str] = set()
+    path_str = target_path or (finding.get("path") if finding else "") or ""
+    if path_str:
+        clean_path = path_str.replace("\\", "/")
+        if clean_path.endswith(".py"):
+            clean_path = clean_path[:-3]
+        parts = [p for p in clean_path.split("/") if p]
+        if parts:
+            candidate_names.add(parts[-1].lower())
+            candidate_names.add(".".join(parts).lower())
+
+    if finding:
+        evidence = str(finding.get("evidence", ""))
+        fn_match = re.search(r"def\s+([a-zA-Z_]\w*)", evidence)
+        if fn_match:
+            candidate_names.add(fn_match.group(1).lower())
+
+    if not candidate_names:
+        return True
+
+    # Check AST imports and references
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for name in node.names:
+                mod_parts = name.name.lower().split(".")
+                if any(c in mod_parts for c in candidate_names):
+                    return True
+        elif isinstance(node, ast.ImportFrom):
+            mod_parts = (node.module or "").lower().split(".")
+            if any(c in mod_parts for c in candidate_names):
+                return True
+            for name in node.names:
+                if name.name.lower() in candidate_names:
+                    return True
+        elif isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id.lower() in candidate_names:
+                return True
+            elif isinstance(node.func, ast.Attribute) and node.func.attr.lower() in candidate_names:
+                return True
+        elif isinstance(node, ast.Name):
+            if node.id.lower() in candidate_names:
+                return True
+
+    # Fallback with exact word boundary
+    content_lower = content.lower()
+    return any(bool(re.search(r"\b" + re.escape(c) + r"\b", content_lower)) for c in candidate_names)
+
+
+def extract_target_context(
+    tree: ast.AST,
+    target_path: str | None = None,
+    finding: dict[str, Any] | None = None,
+) -> tuple[set[str], set[str]]:
+    """Extract candidate target modules and target function symbols.
+    Returns (target_modules, target_symbols).
+    """
+    target_modules: set[str] = set()
+    target_symbols: set[str] = set()
+
+    path_str = target_path or (finding.get("path") if finding else "") or ""
+    module_stems: set[str] = set()
+    if path_str:
+        clean_path = path_str.replace("\\", "/")
+        if clean_path.endswith(".py"):
+            clean_path = clean_path[:-3]
+        parts = [p.lower() for p in clean_path.split("/") if p]
+        if parts:
+            module_stems.add(parts[-1])
+            module_stems.add(".".join(parts))
+
+    if finding:
+        evidence = str(finding.get("evidence", ""))
+        fn_match = re.search(r"def\s+([a-zA-Z_]\w*)", evidence)
+        if fn_match:
+            target_symbols.add(fn_match.group(1).lower())
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                mod_name = alias.name.lower()
+                mod_parts = mod_name.split(".")
+                if any(stem in mod_parts for stem in module_stems):
+                    target_modules.add((alias.asname or alias.name).lower())
+        elif isinstance(node, ast.ImportFrom):
+            mod_name = (node.module or "").lower()
+            mod_parts = mod_name.split(".")
+            is_target_mod = any(stem in mod_parts for stem in module_stems)
+            if is_target_mod or (
+                not module_stems
+                and node.module not in {
+                    "unittest", "pytest", "sys", "os", "re", "json", "sqlite3", "typing", "dataclasses",
+                }
+            ):
+                for alias in node.names:
+                    target_symbols.add((alias.asname or alias.name).lower())
+
+    target_modules.update(module_stems)
+    return target_modules, target_symbols
+
+
+def check_method_security_dataflow(
+    fn: ast.FunctionDef | ast.AsyncFunctionDef,
+    target_modules: set[str],
+    target_symbols: set[str],
+) -> tuple[bool, str]:
+    """Verify that within a single test method:
+    1. SQL injection payload reaches the target code invocation.
+    2. No payload variables are left unused.
+    3. The security assertion evaluates behavior caused by that invocation (not unrelated function results).
+    """
+    def expr_has_sqli(expr: ast.AST) -> bool:
+        for node in ast.walk(expr):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if is_sqli_payload_str(node.value):
+                    return True
+        return False
+
+    def expr_uses_vars(expr: ast.AST, var_set: set[str]) -> set[str]:
+        return {node.id for node in ast.walk(expr) if isinstance(node, ast.Name) and node.id in var_set}
+
+    # 1. Collect payload variables and payload-carrying expressions
+    payload_vars: set[str] = set()
+    payload_carrying_vars: set[str] = set()
+    var_deps: dict[str, set[str]] = {}
+
+    all_assigns: list[tuple[list[str], ast.AST]] = []
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Assign):
+            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            if names and node.value:
+                all_assigns.append((names, node.value))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if node.value:
+                all_assigns.append(([node.target.id], node.value))
+
+    for names, val in all_assigns:
+        if expr_has_sqli(val):
+            for name in names:
+                payload_vars.add(name)
+                payload_carrying_vars.add(name)
+                var_deps[name] = {name}
+        elif any(name.lower() in {"payload", "sqli_payload", "attack_payload", "exploit_payload"} for name in names):
+            for name in names:
+                payload_vars.add(name)
+                payload_carrying_vars.add(name)
+                var_deps[name] = {name}
+
+    # Propagate payload-carrying variables (e.g. q = payload, params = (payload,))
+    for _ in range(3):
+        for names, val in all_assigns:
+            used = expr_uses_vars(val, payload_carrying_vars)
+            if used:
+                for name in names:
+                    payload_carrying_vars.add(name)
+                    var_deps.setdefault(name, set()).update(used)
+                    for u in used:
+                        var_deps.setdefault(name, set()).update(var_deps.get(u, set()))
+
+    # 2. Identify target call nodes
+    def is_target_call(call: ast.Call) -> bool:
+        if isinstance(call.func, ast.Name):
+            name_lower = call.func.id.lower()
+            if target_symbols:
+                return name_lower in target_symbols
+            return name_lower not in BUILTIN_FUNCS and not name_lower.startswith("assert")
+        elif isinstance(call.func, ast.Attribute):
+            attr_lower = call.func.attr.lower()
+            if target_symbols and attr_lower in target_symbols:
+                return True
+            if isinstance(call.func.value, ast.Name):
+                val_id = call.func.value.id.lower()
+                if target_modules:
+                    return val_id in target_modules
+                return val_id not in {"self", "unittest", "pytest"}
+            if isinstance(call.func.value, ast.Attribute) and target_modules:
+                return call.func.value.attr.lower() in target_modules
+        return False
+
+    used_payload_vars: set[str] = set()
+    target_calls_with_payload: list[ast.Call] = []
+
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Call) and is_target_call(node):
+            all_args = list(node.args) + [kw.value for kw in node.keywords]
+            received = False
+            for arg in all_args:
+                if expr_has_sqli(arg):
+                    received = True
+                used = expr_uses_vars(arg, payload_carrying_vars)
+                if used:
+                    received = True
+                    for u in used:
+                        used_payload_vars.update(var_deps.get(u, {u}))
+            if received:
+                target_calls_with_payload.append(node)
+
+    # 3. Check for unused payload variables
+    unused_payloads = payload_vars - used_payload_vars
+    if unused_payloads:
+        return (
+            False,
+            f"Unused payload variable(s) {sorted(unused_payloads)} in method '{fn.name}': payload is defined but does not reach target code invocation.",
+        )
+
+    # 4. Must invoke target code with payload
+    if not target_calls_with_payload:
+        return False, f"Method '{fn.name}' does not invoke target code with an SQL injection payload."
+
+    # 5. Track result variables from target calls
+    target_result_vars: set[str] = set()
+    unrelated_call_result_vars: set[str] = set()
+
+    for names, val in all_assigns:
+        has_target_call = False
+        for node in ast.walk(val):
+            if node in target_calls_with_payload:
+                has_target_call = True
+                break
+        if has_target_call:
+            for name in names:
+                target_result_vars.add(name)
+        elif any(
+            isinstance(node, ast.Call)
+            and not (isinstance(node.func, ast.Name) and node.func.id in BUILTIN_FUNCS)
+            for node in ast.walk(val)
+        ):
+            for name in names:
+                unrelated_call_result_vars.add(name)
+        else:
+            if expr_uses_vars(val, target_result_vars):
+                for name in names:
+                    target_result_vars.add(name)
+            else:
+                for name in names:
+                    unrelated_call_result_vars.add(name)
+
+    # Propagate derived results (e.g. count = len(rows), is_empty = len(rows) == 0)
+    for _ in range(3):
+        for names, val in all_assigns:
+            if expr_uses_vars(val, target_result_vars):
+                for name in names:
+                    target_result_vars.add(name)
+
+    # 6. Check assertions
+    assertions: list[ast.AST] = []
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Assert):
+            assertions.append(node)
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if node.func.attr.startswith("assert"):
+                assertions.append(node)
+        elif isinstance(node, ast.With):
+            for item in node.items:
+                if isinstance(item.context_expr, ast.Call) and isinstance(item.context_expr.func, ast.Attribute):
+                    if item.context_expr.func.attr.startswith("assert"):
+                        assertions.append(node)
+
+    if not assertions:
+        return False, f"Method '{fn.name}' contains no assertions."
+
+    valid_security_assertions: list[ast.AST] = []
+    unrelated_assertions: list[tuple[ast.AST, str]] = []
+
+    for assert_node in assertions:
+        contains_target = any(node in target_calls_with_payload for node in ast.walk(assert_node))
+        if contains_target:
+            valid_security_assertions.append(assert_node)
+            continue
+
+        used_target = expr_uses_vars(assert_node, target_result_vars)
+        if used_target:
+            valid_security_assertions.append(assert_node)
+            continue
+
+        used_unrelated = expr_uses_vars(assert_node, unrelated_call_result_vars)
+        if used_unrelated:
+            unrelated_assertions.append((assert_node, ", ".join(sorted(used_unrelated))))
+            continue
+
+        unrelated_calls: list[str] = []
+        for node in ast.walk(assert_node):
+            if isinstance(node, ast.Call):
+                fn_name = ""
+                if isinstance(node.func, ast.Name):
+                    fn_name = node.func.id
+                elif isinstance(node.func, ast.Attribute):
+                    fn_name = node.func.attr
+                if fn_name and fn_name not in BUILTIN_FUNCS and not fn_name.startswith("assert") and not is_target_call(node):
+                    unrelated_calls.append(f"{fn_name}()")
+        if unrelated_calls:
+            unrelated_assertions.append((assert_node, ", ".join(unrelated_calls)))
+            continue
+
+    if not valid_security_assertions:
+        if unrelated_assertions:
+            bad_vars = unrelated_assertions[0][1]
+            return (
+                False,
+                f"Security assertion in method '{fn.name}' evaluates unrelated variable/function result ('{bad_vars}') instead of target code invocation result.",
+            )
+        return (
+            False,
+            f"Test method '{fn.name}' contains no security assertions evaluating the result of the target code invocation.",
+        )
+
+    return True, f"Method '{fn.name}' meaningfully connects target invocation, payload, and assertion."
+
+
+def validate_security_exploit_test(
+    content: str,
+    finding: dict[str, Any] | None = None,
+    target_path: str | None = None,
+) -> tuple[bool, str]:
+    """Validate that a security exploit test meaningfully exercises target code with relevant SQLi payload and non-trivial assertions."""
+    if not content or not content.strip():
+        return False, "Security exploit test content is empty."
+
+    try:
+        tree = ast.parse(content)
+    except SyntaxError as exc:
+        return False, f"Syntax error in exploit test: {exc}"
+
+    # 1. Must define test methods
+    test_methods = [
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test")
+    ]
+    if not test_methods:
+        return False, "Exploit test must define at least one test method starting with 'test'."
+
+    # 2. Must exercise target code
+    if not exercises_target_code(tree, content, target_path=target_path, finding=finding):
+        path_name = target_path or (finding.get("path") if finding else "target code")
+        return False, f"Exploit test does not import or exercise the target code from '{path_name}'."
+
+    # 3. Must contain relevant SQL injection payload
+    if not has_relevant_sqli_payload(tree, content):
+        return False, "Exploit test does not contain a recognized SQL injection payload (e.g. \"' OR 1=1 --\")."
+
+    # 4. Must not have trivial assertions
+    is_trivial, trivial_msg = check_trivial_assertions(tree)
+    if is_trivial:
+        return False, f"Exploit test contains trivial assertion ({trivial_msg}) instead of testing security behavior."
+
+    # 5. Must have meaningful assertions
+    if not has_meaningful_assertions(tree):
+        return False, "Exploit test does not contain any non-trivial assertions verifying security behavior."
+
+    # 6. Must meaningfully connect target invocation, payload argument, and security assertion
+    target_modules, target_symbols = extract_target_context(tree, target_path=target_path, finding=finding)
+
+    # First: reject unused payload variables across all test methods
+    for fn in test_methods:
+        is_ok, msg = check_method_security_dataflow(fn, target_modules, target_symbols)
+        if not is_ok and "Unused payload variable" in msg:
+            return False, msg
+
+    # Second: at least one test method must meaningfully connect target invocation, payload, and assertion
+    valid_methods: list[str] = []
+    method_errors: list[str] = []
+    for fn in test_methods:
+        is_ok, msg = check_method_security_dataflow(fn, target_modules, target_symbols)
+        if is_ok:
+            valid_methods.append(fn.name)
+        else:
+            method_errors.append(msg)
+
+    if not valid_methods:
+        err = method_errors[0] if method_errors else "No test method meaningfully connects target invocation, payload argument, and security assertion."
+        return False, err
+
+    return True, "Exploit test is valid."
+
+
+def is_security_assertion_failure(
+    combined_output: str,
+    test_content: str | None = None,
+    finding: dict[str, Any] | None = None,
+) -> tuple[bool, str]:
+    """Check if test failure in output is tied to targeted security behavior rather than an arbitrary/unrelated assertion."""
+    lines = combined_output.splitlines()
+    failing_code_line = ""
+    assertion_error_line = ""
+
+    for i, line in enumerate(lines):
+        if "AssertionError" in line:
+            assertion_error_line = line
+            for j in range(i - 1, max(-1, i - 6), -1):
+                candidate = lines[j].strip()
+                if candidate and not candidate.startswith("File ") and not candidate.startswith("Traceback"):
+                    failing_code_line = candidate
+                    break
+            break
+
+    failing_lower = failing_code_line.lower()
+    if (
+        "asserttrue(false)" in failing_lower
+        or "assertfalse(true)" in failing_lower
+        or failing_lower == "assert false"
+        or "assertequal(1, 2)" in failing_lower
+        or "assertequal(0, 1)" in failing_lower
+        or "assertequal(true, false)" in failing_lower
+        or "assert 1 == 2" in failing_lower
+    ):
+        return False, f"Trivial assertion failure: {failing_code_line}"
+
+    # If test_content is provided, inspect variables tested in failing_code_line
+    if test_content:
+        try:
+            tree = ast.parse(test_content)
+            target_modules, target_symbols = extract_target_context(tree, None, finding)
+            unrelated_vars: set[str] = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Assign):
+                    names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+                    for child in ast.walk(node.value):
+                        if isinstance(child, ast.Call):
+                            call_name = ""
+                            if isinstance(child.func, ast.Name):
+                                call_name = child.func.id.lower()
+                            elif isinstance(child.func, ast.Attribute):
+                                call_name = child.func.attr.lower()
+                            if (
+                                call_name
+                                and call_name not in BUILTIN_FUNCS
+                                and call_name not in target_symbols
+                            ):
+                                for name in names:
+                                    unrelated_vars.add(name.lower())
+                elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value:
+                    for child in ast.walk(node.value):
+                        if isinstance(child, ast.Call):
+                            call_name = ""
+                            if isinstance(child.func, ast.Name):
+                                call_name = child.func.id.lower()
+                            elif isinstance(child.func, ast.Attribute):
+                                call_name = child.func.attr.lower()
+                            if (
+                                call_name
+                                and call_name not in BUILTIN_FUNCS
+                                and call_name not in target_symbols
+                            ):
+                                unrelated_vars.add(node.target.id.lower())
+
+            tested_unrelated = [v for v in unrelated_vars if re.search(r"\b" + re.escape(v) + r"\b", failing_lower)]
+            if tested_unrelated:
+                return False, f"Assertion failure on line '{failing_code_line}' evaluates result of unrelated function ('{tested_unrelated[0]}')."
+        except Exception:
+            pass
+
+    keywords = set(SECURITY_KEYWORDS)
+    if finding:
+        path = str(finding.get("path", "")).replace(".py", "").split("/")[-1]
+        if path:
+            keywords.add(path.lower())
+        evidence = str(finding.get("evidence", ""))
+        fn_match = re.search(r"def\s+([a-zA-Z_]\w*)", evidence)
+        if fn_match:
+            keywords.add(fn_match.group(1).lower())
+
+    err_lower = assertion_error_line.lower()
+
+    # Check if assertion error line or failing code line has security keywords
+    has_security_keyword = any(kw in err_lower for kw in keywords) or any(kw in failing_lower for kw in keywords)
+
+    # Check if query result variables are tested in failing code line (e.g. rows, results, users)
+    checks_results = bool(re.search(r"(?:len\s*\(\s*\w+\s*\)|rows|result|users|output|response|data|count)", failing_lower))
+
+    if not has_security_keyword and not checks_results:
+        return False, f"Assertion failure on line '{failing_code_line}' does not demonstrate targeted security behavior."
+
+    return True, "Security assertion failure verified."
+
+
+def classify_test_result(
+    result: dict[str, Any],
+    test_content: str | None = None,
+    finding: dict[str, Any] | None = None,
+) -> TestClassification:
     """Distinguish assertion failures from setup errors, import errors, timeouts, and sandbox failures."""
     stdout = str(result.get("stdout") or "")
     stderr = str(result.get("stderr") or "")
@@ -233,12 +846,22 @@ def classify_test_result(result: dict[str, Any]) -> TestClassification:
         )
 
     if has_assertion_error or has_unittest_failure:
+        is_sec, sec_msg = is_security_assertion_failure(combined, test_content=test_content, finding=finding)
+        if not is_sec:
+            return TestClassification(
+                outcome="setup_error",
+                is_assertion_failure=False,
+                is_passed=False,
+                message=f"Security test failed with an assertion unrelated to the targeted vulnerability: {sec_msg}",
+                details={"status": status, "exit_code": exit_code, "security_check": False, "reason": sec_msg},
+            )
+
         return TestClassification(
             outcome="assertion_failure",
             is_assertion_failure=True,
             is_passed=False,
             message="Security test failed with an assertion failure reproducing the vulnerability.",
-            details={"status": status, "exit_code": exit_code},
+            details={"status": status, "exit_code": exit_code, "security_check": True},
         )
 
     # Fallback non-zero exit code without confirmed assertion failure
@@ -420,6 +1043,8 @@ async def verify_remediation(
             exploit_test_path = generated["path"]
             exploit_test_content = generated["content"]
             is_generated_exploit = True
+    elif exploit_test_path:
+        exploit_test_content = files.get(exploit_test_path, "")
 
     # Check for demo provider or unexecutable sandbox
     if provider == "demo":
@@ -444,7 +1069,7 @@ async def verify_remediation(
             sandbox_provider=provider,
         )
 
-    # 3. Security exploit test availability check
+    # 3. Security exploit test availability and validation check
     if not exploit_test_path:
         security_exploit = VerificationCheck(
             name="security_exploit_test",
@@ -453,7 +1078,6 @@ async def verify_remediation(
             message="Security exploit test could not be generated or identified. Passing unrelated tests cannot verify the vulnerability is fixed.",
             details={},
         )
-        # Still evaluate regression tests if test suite exists
         existing_tests = [p for p in files.keys() if is_test_file(p)]
         if not existing_tests:
             regression_tests = VerificationCheck(
@@ -490,6 +1114,59 @@ async def verify_remediation(
             sandbox_provider=provider,
         )
 
+    # Validate test content to ensure it meaningfully exercises target code with a payload
+    if exploit_test_path and exploit_test_content:
+        primary_finding = findings[0] if findings else None
+        target_path = primary_finding["path"] if primary_finding else None
+        is_valid, validation_msg = validate_security_exploit_test(
+            exploit_test_content,
+            finding=primary_finding,
+            target_path=target_path,
+        )
+        if not is_valid:
+            security_exploit = VerificationCheck(
+                name="security_exploit_test",
+                status="unverified",
+                passed=False,
+                message=f"Security exploit test was rejected: {validation_msg}",
+                details={"reason": validation_msg, "path": exploit_test_path},
+            )
+            existing_tests = [p for p in files.keys() if is_test_file(p)]
+            if not existing_tests:
+                regression_tests = VerificationCheck(
+                    name="regression_tests",
+                    status="skipped",
+                    passed=True,
+                    message="No separate regression test suite detected in repository snapshot.",
+                    details={"test_files": []},
+                )
+            else:
+                try:
+                    reg_result = await sandbox_service.run_tests(patched_files, timeout_seconds=timeout_seconds)
+                    reg_ran = tests_ran(reg_result)
+                    reg_passed = reg_result.get("status") == "passed" and reg_ran
+                    regression_tests = VerificationCheck(
+                        name="regression_tests",
+                        status="passed" if reg_passed else "failed",
+                        passed=reg_passed,
+                        message="Preexisting regression tests passed without errors." if reg_passed else "Regression tests failed after applying patch.",
+                        details=reg_result,
+                    )
+                except SandboxError as exc:
+                    regression_tests = VerificationCheck(
+                        name="regression_tests",
+                        status="error",
+                        passed=False,
+                        message=f"Sandbox error while executing regression tests: {exc}",
+                        details={"error": str(exc)},
+                    )
+            return evaluate_verification_gate(
+                static_recheck=static_recheck,
+                security_exploit=security_exploit,
+                regression_tests=regression_tests,
+                sandbox_provider=provider,
+            )
+
     # 4. Prepare snapshots for differential verification
     before_files = dict(files)
     after_files = dict(patched_files)
@@ -500,6 +1177,7 @@ async def verify_remediation(
         after_files[exploit_test_path] = files[exploit_test_path]
 
     test_pattern = exploit_test_path.split("/")[-1]
+    primary_finding = findings[0] if findings else None
 
     # Step A: Differential verification on ORIGINAL snapshot (Before patch)
     before_result: dict[str, Any]
@@ -531,7 +1209,11 @@ async def verify_remediation(
             sandbox_provider=provider,
         )
 
-    before_class = classify_test_result(before_result)
+    before_class = classify_test_result(
+        before_result,
+        test_content=exploit_test_content,
+        finding=primary_finding,
+    )
     before_reproduced = before_class.is_assertion_failure
 
     before_evidence: dict[str, Any] = {
@@ -583,7 +1265,6 @@ async def verify_remediation(
             "stderr": "",
         }
     elif not before_reproduced:
-        # Setup errors, import errors, discovery errors, timeouts
         security_exploit = VerificationCheck(
             name="security_exploit_test",
             status="unverified",
@@ -601,7 +1282,7 @@ async def verify_remediation(
             "stderr": "",
         }
     else:
-        # Before run successfully reproduced the vulnerability via assertion failure!
+        # Before run successfully reproduced the vulnerability via targeted assertion failure!
         # Step B: Differential verification on PATCHED snapshot (After patch)
         try:
             after_result = await sandbox_service.run_tests(
@@ -632,7 +1313,11 @@ async def verify_remediation(
                 before=before_evidence,
             )
 
-        after_class = classify_test_result(after_result)
+        after_class = classify_test_result(
+            after_result,
+            test_content=exploit_test_content,
+            finding=primary_finding,
+        )
         after_blocked = after_class.is_passed
 
         after_evidence = {
@@ -670,7 +1355,6 @@ async def verify_remediation(
     combined_test_output: dict[str, Any] | None = after_result or before_result
 
     if not existing_tests or (exploit_test_path and not pure_regression_tests and not is_generated_exploit):
-        # No independent regression suite existed before this remediation
         regression_tests = VerificationCheck(
             name="regression_tests",
             status="skipped",

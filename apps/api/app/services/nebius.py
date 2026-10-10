@@ -1,4 +1,3 @@
-import ast
 import json
 from typing import Any
 
@@ -104,17 +103,11 @@ class NebiusService:
             return None
         if not _safe_relative_path(test_path):
             return None
-        try:
-            tree = ast.parse(test_content)
-        except SyntaxError:
-            return None
 
-        has_test = any(
-            (isinstance(node, ast.ClassDef) and any("test" in getattr(b, "id", "").lower() for b in node.bases if isinstance(b, ast.Name)))
-            or (isinstance(node, ast.FunctionDef) and node.name.startswith("test"))
-            for node in ast.walk(tree)
-        )
-        if not has_test:
+        from app.services.verifier import validate_security_exploit_test
+
+        is_valid, _ = validate_security_exploit_test(test_content, finding=finding, target_path=path)
+        if not is_valid:
             return None
         return {"path": test_path, "content": test_content, "reason": reason}
 
