@@ -46,28 +46,40 @@ async def run_scan_job(scan_id: str, installation_id: str, full_name: str) -> No
             summary = "Nemotron analysis skipped: configure NEBIUS_API_KEY to enable model reasoning and patch proposals."
 
         proposals: list[dict[str, str]] = []
+        candidate_proposals: list[dict[str, str]] = []
         patched_files = dict(files)
         patch_messages: list[str] = []
         if findings and nebius.configured:
             await update_job(scan_id, stage="remediating", message="Requesting a constrained remediation proposal from Nemotron…")
             for finding in findings[:3]:
-                source = files.get(finding["path"], "")
+                path = finding.get("path", "")
+                source = files.get(path, "")
+                if not source:
+                    patch_messages.append(f"{path}: Source file not found in repository snapshot.")
+                    continue
                 try:
-                    proposal = await nebius.propose_patch(path=finding["path"], source=source, finding=finding)
+                    proposal = await nebius.propose_patch(
+                        path=path,
+                        source=source,
+                        finding=finding,
+                        diagnostics=patch_messages,
+                    )
                     if proposal:
-                        proposals.append(proposal)
-                    else:
-                        patch_messages.append(f"No safe exact replacement was produced for {finding['path']}.")
+                        candidate_proposals.append(proposal)
                 except NebiusUnavailable as exc:
-                    patch_messages.append(str(exc))
-                    break
-        if proposals:
-            try:
-                patched_files = apply_exact_replacements(files, proposals)
-            except ValueError as exc:
-                proposals = []
-                patched_files = dict(files)
-                patch_messages.append(f"Patch rejected by context validation: {exc}")
+                    patch_messages.append(f"{path}: Nebius unavailable: {exc}")
+                    continue
+                except Exception as exc:
+                    patch_messages.append(f"{path}: Proposal generation failed: {exc}")
+                    continue
+
+        if candidate_proposals:
+            for prop in candidate_proposals:
+                try:
+                    patched_files = apply_exact_replacements(patched_files, [prop])
+                    proposals.append(prop)
+                except ValueError as exc:
+                    patch_messages.append(f"Patch rejected by context validation for {prop.get('path')}: {exc}")
 
         changed_files = {
             path: content for path, content in patched_files.items()
@@ -94,6 +106,13 @@ async def run_scan_job(scan_id: str, installation_id: str, full_name: str) -> No
             )
             verification = gate_result.as_dict()
         else:
+            if not nebius.configured:
+                no_patch_msg = "No validated patch was prepared. Configure NEBIUS_API_KEY to enable model-assisted patch proposals."
+            elif patch_messages:
+                no_patch_msg = f"No validated patch was prepared. Proposal rejected: {patch_messages[-1]}"
+            else:
+                no_patch_msg = "No validated patch was prepared. Model proposals could not be validated against repository context."
+
             verification = {
                 "status": "unverified",
                 "sandbox_provider": settings.sandbox_provider,
@@ -122,7 +141,7 @@ async def run_scan_job(scan_id: str, installation_id: str, full_name: str) -> No
                     "details": {},
                 },
                 "tests": None,
-                "message": "No validated patch was prepared. Configure Nebius and inspect the model proposal details before proceeding.",
+                "message": no_patch_msg,
                 "eligible_for_pr": False,
             }
 

@@ -408,8 +408,36 @@ def check_method_security_dataflow(
             if node.value:
                 all_assigns.append(([node.target.id], node.value))
 
+    def val_is_call(val: ast.AST) -> bool:
+        """Return True if the top-level expression is a function/method call."""
+        return isinstance(val, ast.Call)
+
+    def expr_has_sqli_non_call(val: ast.AST) -> bool:
+        """Like expr_has_sqli but does NOT descend into Call arguments.
+
+        This prevents classifying `rows = search(conn, "' OR 1=1 --")` as
+        a payload-source assignment: the SQLi literal is an *argument to* the
+        call, not a value being stored into `rows`.  Only direct payload
+        literals and non-call expressions that carry a payload string are
+        classified as payload sources.
+        """
+        if isinstance(val, ast.Call):
+            # The targets of this assignment receive the *result* of the call,
+            # not the payload.  Do not classify them as payload variables.
+            return False
+        for node in ast.walk(val):
+            # Stop descending into nested calls to avoid the same false positive
+            # at deeper nesting levels.
+            if isinstance(node, ast.Call):
+                continue
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if is_sqli_payload_str(node.value):
+                    return True
+        return False
+
     for names, val in all_assigns:
-        if expr_has_sqli(val):
+        if expr_has_sqli_non_call(val):
+            # Assignment target directly holds a payload string (not a call result).
             for name in names:
                 payload_vars.add(name)
                 payload_carrying_vars.add(name)
@@ -420,9 +448,17 @@ def check_method_security_dataflow(
                 payload_carrying_vars.add(name)
                 var_deps[name] = {name}
 
-    # Propagate payload-carrying variables (e.g. q = payload, params = (payload,))
+    # Propagate payload-carrying variables into non-call expressions only.
+    # e.g. q = payload → q is a payload carrier; params = (payload,) → params is too.
+    # But: rows = search(conn, payload) → rows is a *call result*, not a payload carrier;
+    # the payload was *consumed* by the call.  Skip call-result assignments so that
+    # result variables are not mistakenly treated as unused payload variables later.
     for _ in range(3):
         for names, val in all_assigns:
+            if val_is_call(val):
+                # Call results are tracked separately as target_result_vars (step 5).
+                # Do not propagate payload_carrying status into them here.
+                continue
             used = expr_uses_vars(val, payload_carrying_vars)
             if used:
                 for name in names:

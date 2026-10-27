@@ -14,6 +14,8 @@ SOURCE_BASENAMES = {"Makefile", "Dockerfile", "pyproject.toml", "package.json", 
 IGNORED_PARTS = {
     ".git", "node_modules", "vendor", "dist", "build", "coverage", ".venv", "venv",
     "__pycache__", "migrations", "generated", "fixtures", "lockfiles",
+    # Teaching / demonstration directories are intentionally vulnerable and must not be patched.
+    "examples", "example", "demos", "demo", "samples", "sample",
 }
 
 

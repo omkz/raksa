@@ -35,3 +35,57 @@ def test_rejects_path_traversal() -> None:
         assert "Unsafe patch path" in str(exc)
     else:
         raise AssertionError("Expected unsafe path to be rejected")
+
+
+def test_skips_test_files_and_demo_fixtures() -> None:
+    vulnerable_snippet = 'def search(c, n):\n    q = f"SELECT * FROM u WHERE name = \'{n}\'"\n    return c.execute(q).fetchall()\n'
+    files = {
+        "tests/test_search.py": vulnerable_snippet,
+        "app/services/demo_proof.py": vulnerable_snippet,
+        "examples/sample/app.py": vulnerable_snippet,
+        "fixture.py": "# INTENTIONAL VULNERABILITY\n" + vulnerable_snippet,
+        "real_app/views.py": vulnerable_snippet,
+    }
+    findings = detect_sql_injection(files)
+    assert len(findings) == 1
+    assert findings[0]["path"] == "real_app/views.py"
+
+
+def test_validate_patch_proposal_strict_path() -> None:
+    from app.services.analyzer import validate_patch_proposal
+    source = "def foo():\n    return 1\n"
+
+    # Missing path
+    proposal_missing = {
+        "old_text": "    return 1",
+        "new_text": "    return 2",
+    }
+    validated, error = validate_patch_proposal(proposal_missing, "app.py", source)
+    assert validated is None
+    assert error is not None
+    assert "Wrong path" in error
+    assert "missing" in error
+
+    # Wrong path
+    proposal_wrong = {
+        "path": "wrong.py",
+        "old_text": "    return 1",
+        "new_text": "    return 2",
+    }
+    validated, error = validate_patch_proposal(proposal_wrong, "app.py", source)
+    assert validated is None
+    assert error is not None
+    assert "Wrong path" in error
+    assert "targets 'wrong.py'" in error
+
+    # Correct path
+    proposal_correct = {
+        "path": "app.py",
+        "old_text": "    return 1",
+        "new_text": "    return 2",
+    }
+    validated, error = validate_patch_proposal(proposal_correct, "app.py", source)
+    assert error is None
+    assert validated is not None
+    assert validated["path"] == "app.py"
+    assert validated["new_text"] == "    return 2"

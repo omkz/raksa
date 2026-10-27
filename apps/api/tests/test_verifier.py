@@ -1223,3 +1223,136 @@ async def test_verification_messaging_when_regression_tests_passed() -> None:
     assert "skipped" not in result.message.lower()
     assert result.as_dict()["regression_tests_passed"] is True
     assert result.as_dict()["regression_tests"]["status"] == "passed"
+
+
+# =========================================================================
+# Regression tests: check_method_security_dataflow false-positive fix
+# =========================================================================
+
+# Test that should PASS: inline payload, result captured in `rows`, assertGreater
+INLINE_PAYLOAD_ROWS_ASSERTGREATER = """import unittest
+from app import search
+
+class ExploitTest(unittest.TestCase):
+    def test_injection_returns_extra_rows(self):
+        rows = search(None, "' OR 1=1 --")
+        self.assertGreater(len(rows), 0)
+"""
+
+# Test that should PASS: named payload, result captured in `rows`, assertGreater
+NAMED_PAYLOAD_ROWS_ASSERTGREATER = """import unittest
+from app import search
+
+class ExploitTest(unittest.TestCase):
+    def test_vulnerable_query_returns_all_users_for_injection_payload(self):
+        payload = "' OR 1=1 --"
+        rows = search(None, payload)
+        self.assertGreater(len(rows), 1)
+"""
+
+# Test that should PASS: named payload, assertEqual on len(rows) == 0 (expects blocking)
+NAMED_PAYLOAD_ROWS_EQUAL_ZERO = """import unittest
+from app import search
+
+class ExploitTest(unittest.TestCase):
+    def test_injection_blocked(self):
+        payload = "' OR 1=1 --"
+        rows = search(None, payload)
+        self.assertEqual(len(rows), 0, "Parameterized query blocks injection")
+"""
+
+# Test that should PASS: inline payload directly in assertion (no intermediate var)
+INLINE_PAYLOAD_DIRECT_ASSERT = """import unittest
+from app import search
+
+class ExploitTest(unittest.TestCase):
+    def test_exploit(self):
+        self.assertEqual(len(search(None, "' OR 1=1 --")), 0)
+"""
+
+# Test that should FAIL: payload defined but NEVER passed to the target call
+GENUINELY_UNUSED_PAYLOAD = """import unittest
+from app import search
+
+class ExploitTest(unittest.TestCase):
+    def test_exploit(self):
+        payload = "' OR 1=1 --"
+        rows = search(None, "alice")
+        self.assertEqual(len(rows), 0, "Query returned no rows")
+"""
+
+# Test that should FAIL: result of unrelated function asserted, not target result
+RESULT_OF_UNRELATED_FN = """import unittest
+from app import search
+
+def get_env():
+    return "test"
+
+class ExploitTest(unittest.TestCase):
+    def test_exploit(self):
+        payload = "' OR 1=1 --"
+        rows = search(None, payload)
+        env = get_env()
+        self.assertEqual(env, "prod", "Wrong env")
+"""
+
+
+def test_inline_payload_result_var_is_not_classified_as_payload_var() -> None:
+    """Regression: rows = search(conn, "' OR 1=1 --") must not mark 'rows' as an
+    unused payload variable. The result of the call is a query result, not a payload source."""
+    finding = {"path": "app.py", "evidence": "def search(connection, name):"}
+    is_valid, reason = validate_security_exploit_test(
+        INLINE_PAYLOAD_ROWS_ASSERTGREATER, finding=finding, target_path="app.py"
+    )
+    assert is_valid is True, f"Expected valid, got: {reason}"
+
+
+def test_named_payload_result_var_assertgreater_accepted() -> None:
+    """Regression: payload = '...' followed by rows = target(payload) followed by
+    assertGreater(len(rows), 1) must pass validation."""
+    finding = {"path": "app.py", "evidence": "def search(connection, name):"}
+    is_valid, reason = validate_security_exploit_test(
+        NAMED_PAYLOAD_ROWS_ASSERTGREATER, finding=finding, target_path="app.py"
+    )
+    assert is_valid is True, f"Expected valid, got: {reason}"
+
+
+def test_named_payload_rows_assertEqual_zero_accepted() -> None:
+    """Named payload → rows = target(payload) → assertEqual(len(rows), 0) must be accepted
+    (tests that injection is blocked by parameterization)."""
+    finding = {"path": "app.py", "evidence": "def search(connection, name):"}
+    is_valid, reason = validate_security_exploit_test(
+        NAMED_PAYLOAD_ROWS_EQUAL_ZERO, finding=finding, target_path="app.py"
+    )
+    assert is_valid is True, f"Expected valid, got: {reason}"
+
+
+def test_inline_payload_direct_in_assertion_accepted() -> None:
+    """Inline payload used directly in the assertion call target must still be accepted."""
+    finding = {"path": "app.py", "evidence": "def search(connection, name):"}
+    is_valid, reason = validate_security_exploit_test(
+        INLINE_PAYLOAD_DIRECT_ASSERT, finding=finding, target_path="app.py"
+    )
+    assert is_valid is True, f"Expected valid, got: {reason}"
+
+
+def test_genuinely_unused_payload_still_rejected() -> None:
+    """A payload variable that is defined but never passed to the target call must
+    still be rejected as an unused payload variable."""
+    finding = {"path": "app.py", "evidence": "def search(connection, name):"}
+    is_valid, reason = validate_security_exploit_test(
+        GENUINELY_UNUSED_PAYLOAD, finding=finding, target_path="app.py"
+    )
+    assert is_valid is False, f"Expected invalid (unused payload), got: {reason}"
+    assert "unused payload variable" in reason.lower(), f"Unexpected rejection reason: {reason}"
+
+
+def test_query_result_var_of_unrelated_fn_still_rejected() -> None:
+    """Asserting on the result of an unrelated function (not the target call) must
+    still be rejected, even when the target is invoked with the payload."""
+    finding = {"path": "app.py", "evidence": "def search(connection, name):"}
+    is_valid, reason = validate_security_exploit_test(
+        RESULT_OF_UNRELATED_FN, finding=finding, target_path="app.py"
+    )
+    assert is_valid is False, f"Expected invalid (unrelated result), got: {reason}"
+    assert "unrelated" in reason.lower(), f"Unexpected rejection reason: {reason}"
