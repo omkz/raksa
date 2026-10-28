@@ -5,7 +5,7 @@ from typing import Any, Literal
 
 from app.config import settings
 from app.services.analyzer import detect_sql_injection
-from app.services.sandbox import SandboxError
+from app.services.sandbox import SandboxError, _safe_path
 
 SQLI_PAYLOAD_PATTERNS = [
     r"['\"]\s*or\s+['\"\d\w]",
@@ -683,6 +683,123 @@ def validate_security_exploit_test(
     return True, "Exploit test is valid."
 
 
+DISALLOWED_REGRESSION_MODULES = {
+    "socket", "http", "urllib", "requests", "httpx", "aiohttp",
+    "ftplib", "telnetlib", "smtplib", "xmlrpc", "poplib", "imaplib",
+    "subprocess", "multiprocessing", "pty", "ctypes", "shutil",
+}
+
+DANGEROUS_REGRESSION_OPS = {
+    "system", "popen", "spawn", "exec", "execl", "execle", "execlp",
+    "execv", "execve", "execvp", "execvpe", "fork", "kill", "remove",
+    "unlink", "rmdir", "removedirs", "chmod", "chown", "replace", "rename",
+}
+
+
+def validate_regression_test(
+    content: str,
+    target_path: str | None = None,
+    source: str | None = None,
+    finding: dict[str, Any] | None = None,
+    patch: dict[str, Any] | None = None,
+) -> tuple[bool, str]:
+    """Validate that a generated regression test is safe, well-formed, tests target code, and avoids destructive or network actions."""
+    if not content or not content.strip():
+        return False, "Regression test content is empty."
+
+    try:
+        tree = ast.parse(content)
+    except SyntaxError as exc:
+        return False, f"Syntax error in regression test: {exc}"
+
+    # 1. Must define test methods
+    test_methods = [
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test")
+    ]
+    if not test_methods:
+        return False, "Regression test must define at least one test method starting with 'test'."
+
+    # 2. Disallow network and process/dangerous module imports
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root_mod = alias.name.split(".")[0].lower()
+                if root_mod in DISALLOWED_REGRESSION_MODULES:
+                    return False, f"Disallowed module import in regression test: '{alias.name}'."
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                root_mod = node.module.split(".")[0].lower()
+                if root_mod in DISALLOWED_REGRESSION_MODULES:
+                    return False, f"Disallowed module import in regression test: '{node.module}'."
+
+    # 3. Disallow dangerous calls (eval, exec, __import__, os.system, os.remove, etc.)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name):
+                fn_id = node.func.id
+                if fn_id in {"eval", "exec", "__import__"}:
+                    return False, f"Disallowed built-in call in regression test: '{fn_id}()'."
+            elif isinstance(node.func, ast.Attribute):
+                attr = node.func.attr
+                if attr in DANGEROUS_REGRESSION_OPS:
+                    return False, f"Disallowed call in regression test: '.{attr}()'."
+
+    # 4. Must NOT contain security exploit payloads (characterization tests verify benign behavior)
+    if has_relevant_sqli_payload(tree, content):
+        return False, "Regression test must test benign functional behavior, not contain security exploit payloads."
+
+    # 5. Must not have trivial assertions
+    is_trivial, trivial_msg = check_trivial_assertions(tree)
+    if is_trivial:
+        return False, f"Regression test contains trivial assertion ({trivial_msg})."
+
+    # 6. Must have meaningful assertions
+    if not has_meaningful_assertions(tree):
+        return False, "Regression test does not contain any non-trivial assertions."
+
+    # 7. Must exercise target code and not re-define it locally
+    effective_finding = dict(finding or {})
+    if not effective_finding and patch:
+        old_text = str(patch.get("old_text", ""))
+        fn_match = re.search(r"def\s+([a-zA-Z_]\w*)", old_text)
+        if fn_match:
+            effective_finding["evidence"] = fn_match.group(0)
+
+    target_fns: set[str] = set()
+    if source:
+        try:
+            src_tree = ast.parse(source)
+            for node in ast.walk(src_tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    target_fns.add(node.name.lower())
+        except SyntaxError:
+            pass
+    if effective_finding:
+        fn_match = re.search(r"def\s+([a-zA-Z_]\w*)", str(effective_finding.get("evidence", "")))
+        if fn_match:
+            target_fns.add(fn_match.group(1).lower())
+
+    if target_fns:
+        local_defs = {
+            node.name.lower()
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and not node.name.startswith("test")
+            and node.name not in {"setUp", "tearDown", "setUpClass", "tearDownClass"}
+        }
+        redefined = target_fns.intersection(local_defs)
+        if redefined:
+            return False, f"Regression test redefines target function '{list(redefined)[0]}' instead of importing it from repository."
+
+    effective_target_path = target_path or (patch.get("path") if patch else None)
+    if not exercises_target_code(tree, content, target_path=effective_target_path, finding=effective_finding or None):
+        target_name = effective_target_path or (finding.get("path") if finding else "target code")
+        return False, f"Regression test does not exercise target code from '{target_name}'."
+
+    return True, "Regression test is valid."
+
+
 def is_security_assertion_failure(
     combined_output: str,
     test_content: str | None = None,
@@ -1018,7 +1135,7 @@ def evaluate_verification_gate(
             details=details,
         )
 
-    if not regression_tests.passed and regression_tests.status != "skipped":
+    if not regression_tests.passed and regression_tests.status not in {"skipped", "unavailable"}:
         return VerificationGateResult(
             status="failed",
             eligible_for_pr=False,
@@ -1034,11 +1151,23 @@ def evaluate_verification_gate(
         )
 
     # All required checks passed!
-    if regression_tests.status == "skipped":
+    if regression_tests.status == "unavailable":
+        overall_message = (
+            "Security verification passed: static recheck cleared and differential exploit "
+            "verification proved mitigation. Regression test coverage is unavailable "
+            "(automated characterization tests could not establish reliable coverage). "
+            "A draft PR is eligible for human review; inspect changes carefully before merging."
+        )
+    elif regression_tests.status == "skipped":
         overall_message = (
             "All mandatory verification checks passed: static recheck cleared and differential "
             "exploit verification proved mitigation. Preexisting regression tests were skipped "
             "(no separate regression test suite detected in repository snapshot)."
+        )
+    elif "generated" in str(regression_tests.message).lower() or "characterization" in str(regression_tests.message).lower():
+        overall_message = (
+            "All verification checks passed: static recheck cleared, differential exploit verification "
+            "proved mitigation, and generated characterization tests passed without errors."
         )
     else:
         overall_message = (
@@ -1047,8 +1176,8 @@ def evaluate_verification_gate(
         )
 
     gate_details = dict(details or {})
-    if regression_tests.status == "skipped":
-        gate_details["regression_tests_status"] = "skipped"
+    if regression_tests.status in {"skipped", "unavailable"}:
+        gate_details["regression_tests_status"] = regression_tests.status
 
     return VerificationGateResult(
         status="verified",
@@ -1073,6 +1202,7 @@ async def verify_remediation(
     nebius_service: Any = None,
     timeout_seconds: int | None = None,
     sandbox_provider: str | None = None,
+    patches: list[dict[str, Any]] | None = None,
 ) -> VerificationGateResult:
     """Orchestrate differential exploit verification, regression testing, and static recheck."""
     provider = (sandbox_provider or getattr(sandbox_service, "provider", None) or settings.sandbox_provider).strip().lower()
@@ -1134,9 +1264,9 @@ async def verify_remediation(
         if not existing_tests:
             regression_tests = VerificationCheck(
                 name="regression_tests",
-                status="skipped",
+                status="unavailable",
                 passed=False,
-                message="Regression tests skipped: no separate regression test suite detected in repository snapshot.",
+                message="Regression tests unavailable: no separate regression test suite detected in repository snapshot.",
                 details={"test_files": []},
             )
         else:
@@ -1187,9 +1317,9 @@ async def verify_remediation(
             if not existing_tests:
                 regression_tests = VerificationCheck(
                     name="regression_tests",
-                    status="skipped",
+                    status="unavailable",
                     passed=False,
-                    message="Regression tests skipped: no separate regression test suite detected in repository snapshot.",
+                    message="Regression tests unavailable: no separate regression test suite detected in repository snapshot.",
                     details={"test_files": []},
                 )
             else:
@@ -1399,22 +1529,14 @@ async def verify_remediation(
                 details={"before": before_evidence, "after": after_evidence},
             )
 
-    # 5. Regression tests execution (run existing tests on patched code)
+    # 5. Regression tests execution (run existing tests on patched code, or generate characterization tests)
     existing_tests = [p for p in files.keys() if is_test_file(p)]
     pure_regression_tests = [p for p in existing_tests if p != exploit_test_path]
 
     regression_tests: VerificationCheck
     combined_test_output: dict[str, Any] | None = after_result or before_result
 
-    if not existing_tests or (exploit_test_path and not pure_regression_tests and not is_generated_exploit):
-        regression_tests = VerificationCheck(
-            name="regression_tests",
-            status="skipped",
-            passed=False,
-            message="Regression tests skipped: no separate regression test suite detected in repository snapshot.",
-            details={"test_files": []},
-        )
-    else:
+    if pure_regression_tests:
         try:
             reg_result = await sandbox_service.run_tests(patched_files, timeout_seconds=timeout_seconds)
             if not after_result:
@@ -1436,6 +1558,193 @@ async def verify_remediation(
                 message=f"Sandbox error while executing regression tests: {exc}",
                 details={"error": str(exc)},
             )
+    elif not nebius_service or not getattr(nebius_service, "configured", False) or not hasattr(nebius_service, "generate_regression_test"):
+        regression_tests = VerificationCheck(
+            name="regression_tests",
+            status="unavailable",
+            passed=False,
+            message="Regression tests unavailable: no separate regression test suite detected and model test generation is not configured.",
+            details={"test_files": [], "reason": "model_not_configured"},
+        )
+    else:
+        # No separate regression suite exists; generate characterization test via Nebius
+        primary_finding = findings[0] if findings else None
+        target_path = primary_finding["path"] if primary_finding else (list(patched_files.keys())[0] if patched_files else "")
+        source = files.get(target_path, "")
+        primary_patch = None
+        if patches:
+            for p in patches:
+                if p.get("path") == target_path:
+                    primary_patch = p
+                    break
+            if not primary_patch and patches:
+                primary_patch = patches[0]
+
+        reg_check: VerificationCheck | None = None
+        attempt_errors: list[str] = []
+
+        for _attempt in range(2):
+            diagnostics: list[str] = []
+            retry_arg = attempt_errors[-1] if attempt_errors else None
+            try:
+                try:
+                    generated = await nebius_service.generate_regression_test(
+                        path=target_path,
+                        source=source,
+                        finding=primary_finding,
+                        patch=primary_patch,
+                        retry_error=retry_arg,
+                        diagnostics=diagnostics,
+                    )
+                except TypeError:
+                    generated = await nebius_service.generate_regression_test(
+                        path=target_path,
+                        source=source,
+                        finding=primary_finding,
+                        patch=primary_patch,
+                        retry_error=retry_arg,
+                    )
+            except Exception as exc:
+                attempt_errors.append(f"Model API error: {exc.__class__.__name__}: {exc}")
+                continue
+
+            if not generated or not generated.get("path") or not generated.get("content"):
+                err = diagnostics[-1] if diagnostics else "Missing fields: model response was empty or missing path/content."
+                attempt_errors.append(err)
+                continue
+
+            reg_path = str(generated.get("path", "test_raksa_regression.py")).strip()
+            reg_content = str(generated.get("content", "")).strip()
+
+            if not _safe_path(reg_path) or not reg_path.endswith(".py"):
+                attempt_errors.append(f"Missing fields: unsafe or non-python test path '{reg_path}'.")
+                continue
+
+            is_valid, val_msg = validate_regression_test(
+                reg_content,
+                target_path=target_path,
+                source=source,
+                finding=primary_finding,
+                patch=primary_patch,
+            )
+            if not is_valid:
+                attempt_errors.append(f"Rejected test content: {val_msg}")
+                continue
+
+            # Run in sandbox against original snapshot (baseline) using test_pattern to isolate generated test
+            reg_pattern = reg_path.split("/")[-1]
+            reg_before_files = dict(files)
+            reg_before_files[reg_path] = reg_content
+
+            try:
+                before_reg_res = await sandbox_service.run_tests(
+                    reg_before_files,
+                    timeout_seconds=timeout_seconds,
+                    test_pattern=reg_pattern,
+                )
+            except SandboxError as exc:
+                reg_check = VerificationCheck(
+                    name="regression_tests",
+                    status="error",
+                    passed=False,
+                    message=f"Sandbox error while executing regression test on baseline: {exc}",
+                    details={"error": str(exc)},
+                )
+                break
+
+            if not tests_ran(before_reg_res):
+                attempt_errors.append("Zero tests executed: test discovery failed or 0 test methods ran in sandbox.")
+                continue
+
+            before_reg_passed = before_reg_res.get("status") == "passed" and before_reg_res.get("exit_code") == 0
+            if not before_reg_passed:
+                err_text = (before_reg_res.get("stderr") or before_reg_res.get("stdout") or "Test failed")[:500]
+                attempt_errors.append(f"Baseline failure: characterization test failed against unpatched baseline: {err_text}")
+                continue
+
+            # Original baseline PASSED! Run against patched snapshot
+            reg_after_files = dict(patched_files)
+            reg_after_files[reg_path] = reg_content
+
+            try:
+                after_reg_res = await sandbox_service.run_tests(
+                    reg_after_files,
+                    timeout_seconds=timeout_seconds,
+                    test_pattern=reg_pattern,
+                )
+            except SandboxError as exc:
+                reg_check = VerificationCheck(
+                    name="regression_tests",
+                    status="error",
+                    passed=False,
+                    message=f"Sandbox error while executing regression test on patched code: {exc}",
+                    details={"error": str(exc)},
+                )
+                break
+
+            after_reg_ran = tests_ran(after_reg_res)
+            after_reg_passed = (
+                after_reg_res.get("status") == "passed"
+                and after_reg_res.get("exit_code") == 0
+                and after_reg_ran
+            )
+
+            if not after_reg_passed:
+                # Broke on patched snapshot: regression failure!
+                reg_check = VerificationCheck(
+                    name="regression_tests",
+                    status="failed",
+                    passed=False,
+                    message="Verification failed: regression tests broke after applying the proposed patch.",
+                    details={
+                        "before": before_reg_res,
+                        "after": after_reg_res,
+                        "test_file": reg_path,
+                        "test_content": reg_content,
+                        "reason": "regression_detected",
+                    },
+                )
+                if not after_result:
+                    combined_test_output = after_reg_res
+                break
+            else:
+                # Passed on both!
+                reg_check = VerificationCheck(
+                    name="regression_tests",
+                    status="passed",
+                    passed=True,
+                    message="Generated characterization test passed on both original and patched snapshots without errors.",
+                    details={
+                        "before": before_reg_res,
+                        "after": after_reg_res,
+                        "test_file": reg_path,
+                        "test_content": reg_content,
+                    },
+                )
+                if not after_result:
+                    combined_test_output = after_reg_res
+                break
+
+        if not reg_check:
+            if len(attempt_errors) >= 2:
+                final_err = f"Initial attempt rejected ({attempt_errors[0]}); retry rejected ({attempt_errors[1]})"
+            elif attempt_errors:
+                final_err = attempt_errors[0]
+            else:
+                final_err = "Generation failed"
+
+            reg_check = VerificationCheck(
+                name="regression_tests",
+                status="unavailable",
+                passed=False,
+                message=f"Regression tests unavailable: characterization test generation could not establish reliable coverage ({final_err}).",
+                details={
+                    "reason": final_err,
+                    "attempt_errors": attempt_errors,
+                },
+            )
+
+        regression_tests = reg_check
 
     return evaluate_verification_gate(
         static_recheck=static_recheck,

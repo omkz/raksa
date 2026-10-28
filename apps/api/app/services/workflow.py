@@ -103,6 +103,7 @@ async def run_scan_job(scan_id: str, installation_id: str, full_name: str) -> No
                 findings=findings,
                 sandbox_service=sandbox,
                 nebius_service=nebius,
+                patches=proposals,
             )
             verification = gate_result.as_dict()
         else:

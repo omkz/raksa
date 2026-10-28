@@ -10,6 +10,7 @@ from app.services.verifier import (
     find_existing_security_test,
     is_security_assertion_failure,
     run_static_recheck,
+    validate_regression_test,
     validate_security_exploit_test,
     verify_remediation,
 )
@@ -97,13 +98,53 @@ class DummySandbox:
         }
 
 
+CHARACTERIZATION_TEST_CONTENT = """import unittest
+from app import search
+
+class CharacterizationTests(unittest.TestCase):
+    def test_search_normal_user_returns_results(self):
+        rows = search(None, "alice")
+        self.assertEqual(len(rows), 1)
+"""
+
+
 class DummyNebius:
-    def __init__(self, exploit_test: dict[str, str] | None = None, configured: bool = True):
+    def __init__(
+        self,
+        exploit_test: dict[str, str] | None = None,
+        regression_test: dict[str, str] | None = None,
+        regression_tests: list[dict[str, str] | None] | None = None,
+        diagnostic_errors: list[str] | None = None,
+        configured: bool = True,
+    ):
         self.configured = configured
         self._exploit_test = exploit_test
+        self._regression_test = regression_test
+        self._regression_tests = list(regression_tests) if regression_tests is not None else None
+        self._diagnostic_errors = list(diagnostic_errors) if diagnostic_errors is not None else None
+        self.regression_calls: list[dict[str, Any]] = []
 
     async def generate_exploit_test(self, *, path: str, source: str, finding: dict[str, Any]) -> dict[str, str] | None:
         return self._exploit_test
+
+    async def generate_regression_test(
+        self,
+        *,
+        path: str,
+        source: str,
+        finding: dict[str, Any] | None = None,
+        patch: dict[str, Any] | None = None,
+        retry_error: str | None = None,
+        diagnostics: list[str] | None = None,
+    ) -> dict[str, str] | None:
+        self.regression_calls.append(
+            {"path": path, "source": source, "finding": finding, "patch": patch, "retry_error": retry_error}
+        )
+        if self._diagnostic_errors and diagnostics is not None:
+            diagnostics.append(self._diagnostic_errors.pop(0) if self._diagnostic_errors else "Generation failed")
+        if self._regression_tests is not None:
+            return self._regression_tests.pop(0) if self._regression_tests else None
+        return self._regression_test
 
 
 @pytest.mark.asyncio
@@ -994,6 +1035,7 @@ def test_evaluate_verification_gate_matrix() -> None:
     ok_reg = VerificationCheck("regression_tests", "passed", True, "ok", {})
     fail_reg = VerificationCheck("regression_tests", "failed", False, "failed", {})
     skip_reg = VerificationCheck("regression_tests", "skipped", True, "skipped", {})
+    unavail_reg = VerificationCheck("regression_tests", "unavailable", False, "unavailable", {})
 
     # All pass -> verified
     gate_ok = evaluate_verification_gate(ok_static, ok_exploit, ok_reg, "docker")
@@ -1008,6 +1050,13 @@ def test_evaluate_verification_gate_matrix() -> None:
     assert gate_skip.eligible_for_pr is True
     assert "regression tests were skipped" in gate_skip.message.lower()
     assert "passed without errors" not in gate_skip.message.lower()
+
+    # Unavailable regression tests + passed exploit + passed static -> verified for draft PR
+    gate_unavail_reg = evaluate_verification_gate(ok_static, ok_exploit, unavail_reg, "docker")
+    assert gate_unavail_reg.status == "verified"
+    assert gate_unavail_reg.eligible_for_pr is True
+    assert gate_unavail_reg.regression_tests.passed is False
+    assert "regression test coverage is unavailable" in gate_unavail_reg.message.lower()
 
     # Unavailable exploit -> unverified
     gate_unavail = evaluate_verification_gate(ok_static, unavail_exploit, ok_reg, "docker")
@@ -1130,8 +1179,8 @@ def test_valid_inline_and_derived_exploit_tests() -> None:
 
 
 @pytest.mark.asyncio
-async def test_verification_messaging_when_regression_tests_skipped() -> None:
-    """When no separate regression test suite exists, overall verification explicitly states regressions were skipped and preserves PR eligibility."""
+async def test_verification_messaging_when_regression_tests_unavailable() -> None:
+    """When no separate regression test suite exists and test generation is unavailable, verification reports regression coverage unavailable and preserves draft PR eligibility."""
     files = {"app.py": VULNERABLE_SOURCE}
     patched_files = {"app.py": FIXED_SOURCE}
     findings = [{"id": "sqli-1", "path": "app.py", "line": 2}]
@@ -1162,13 +1211,355 @@ async def test_verification_messaging_when_regression_tests_skipped() -> None:
 
     assert result.status == "verified"
     assert result.eligible_for_pr is True
-    assert result.regression_tests.status == "skipped"
+    assert result.regression_tests.status == "unavailable"
     assert result.regression_tests.passed is False
-    assert "skipped" in result.regression_tests.message.lower()
-    assert "regression tests were skipped" in result.message.lower()
+    assert "unavailable" in result.regression_tests.message.lower()
+    assert "regression test coverage is unavailable" in result.message.lower()
     assert "passed without errors" not in result.message.lower()
     assert result.as_dict()["regression_tests_passed"] is False
-    assert result.as_dict()["regression_tests"]["status"] == "skipped"
+    assert result.as_dict()["regression_tests"]["status"] == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_generated_regression_tests_success() -> None:
+    """When no separate regression suite exists, Nemotron generates a characterization test that passes before and after, verifying regression coverage."""
+    files = {"app.py": VULNERABLE_SOURCE}
+    patched_files = {"app.py": FIXED_SOURCE}
+    findings = [{"id": "sqli-1", "path": "app.py", "line": 2, "evidence": "def search(connection, name):"}]
+
+    sandbox = DummySandbox(responses={
+        "test_raksa_exploit.py:before": {
+            "provider": "docker",
+            "status": "failed",
+            "exit_code": 1,
+            "stdout": "Ran 1 test in 0.01s\n\nFAILED (failures=1)\n",
+            "stderr": "FAIL: test_injection_blocked\nAssertionError: 3 != 0 : SQL injection payload returned unintended rows",
+        },
+        "test_raksa_exploit.py:after": {
+            "provider": "docker",
+            "status": "passed",
+            "exit_code": 0,
+            "stdout": "Ran 1 test in 0.01s\n\nOK\n",
+            "stderr": "",
+        },
+        "test_raksa_regression.py:before": {
+            "provider": "docker",
+            "status": "passed",
+            "exit_code": 0,
+            "stdout": "Ran 1 test in 0.01s\n\nOK\n",
+            "stderr": "",
+        },
+        "test_raksa_regression.py:after": {
+            "provider": "docker",
+            "status": "passed",
+            "exit_code": 0,
+            "stdout": "Ran 1 test in 0.01s\n\nOK\n",
+            "stderr": "",
+        },
+    })
+    nebius = DummyNebius(
+        exploit_test={"path": "test_raksa_exploit.py", "content": EXPLOIT_TEST_CONTENT, "reason": "exploit"},
+        regression_test={"path": "test_raksa_regression.py", "content": CHARACTERIZATION_TEST_CONTENT, "reason": "characterization"},
+    )
+
+    result = await verify_remediation(files, patched_files, findings, sandbox, nebius)
+
+    assert result.status == "verified"
+    assert result.eligible_for_pr is True
+    assert result.regression_tests.status == "passed"
+    assert result.regression_tests.passed is True
+    assert "characterization test passed" in result.regression_tests.message.lower()
+    assert "passed without errors" in result.message.lower()
+    assert result.as_dict()["regression_tests_passed"] is True
+
+
+@pytest.mark.asyncio
+async def test_generated_regression_tests_invalid_retried_and_rejected() -> None:
+    """When generated regression test is invalid (unsafe module / malformed), it is retried once with validation feedback; if still invalid, reported as unavailable."""
+    files = {"app.py": VULNERABLE_SOURCE}
+    patched_files = {"app.py": FIXED_SOURCE}
+    findings = [{"id": "sqli-1", "path": "app.py", "line": 2, "evidence": "def search(connection, name):"}]
+
+    invalid_test_1 = "import socket\nimport unittest\nclass T(unittest.TestCase):\n def test_s(self):\n  self.assertEqual(1, 1)"
+    invalid_test_2 = "import subprocess\nimport unittest\nclass T(unittest.TestCase):\n def test_s(self):\n  self.assertEqual(1, 1)"
+
+    sandbox = DummySandbox(responses={
+        "test_raksa_exploit.py:before": {
+            "provider": "docker", "status": "failed", "exit_code": 1,
+            "stdout": "Ran 1 test in 0.01s\nFAILED\n",
+            "stderr": "AssertionError: 3 != 0 : SQL injection payload returned unintended rows",
+        },
+        "test_raksa_exploit.py:after": {
+            "provider": "docker", "status": "passed", "exit_code": 0,
+            "stdout": "Ran 1 test in 0.01s\nOK\n", "stderr": "",
+        },
+    })
+    nebius = DummyNebius(
+        exploit_test={"path": "test_raksa_exploit.py", "content": EXPLOIT_TEST_CONTENT, "reason": "exploit"},
+        regression_tests=[
+            {"path": "test_raksa_regression.py", "content": invalid_test_1, "reason": "attempt 1"},
+            {"path": "test_raksa_regression.py", "content": invalid_test_2, "reason": "attempt 2"},
+        ],
+    )
+
+    result = await verify_remediation(files, patched_files, findings, sandbox, nebius)
+
+    assert len(nebius.regression_calls) == 2
+    assert nebius.regression_calls[1]["retry_error"] is not None
+    assert "socket" in nebius.regression_calls[1]["retry_error"]
+    assert result.status == "verified"
+    assert result.eligible_for_pr is True
+    assert result.regression_tests.status == "unavailable"
+    assert result.regression_tests.passed is False
+    assert "rejected test content" in result.regression_tests.message.lower()
+    assert "socket" in result.regression_tests.message.lower()
+
+
+@pytest.mark.asyncio
+async def test_generated_regression_tests_invalid_then_valid_retry() -> None:
+    """When first generated test fails validation, it retries once with error context; if second attempt is valid, test runs and passes."""
+    files = {"app.py": VULNERABLE_SOURCE}
+    patched_files = {"app.py": FIXED_SOURCE}
+    findings = [{"id": "sqli-1", "path": "app.py", "line": 2, "evidence": "def search(connection, name):"}]
+
+    invalid_test = "import socket\nimport unittest\nclass T(unittest.TestCase):\n def test_s(self):\n  self.assertEqual(1, 1)"
+
+    sandbox = DummySandbox(responses={
+        "test_raksa_exploit.py:before": {
+            "provider": "docker", "status": "failed", "exit_code": 1,
+            "stdout": "Ran 1 test\nFAILED\n",
+            "stderr": "AssertionError: 3 != 0 : SQL injection payload returned unintended rows",
+        },
+        "test_raksa_exploit.py:after": {
+            "provider": "docker", "status": "passed", "exit_code": 0,
+            "stdout": "Ran 1 test\nOK\n", "stderr": "",
+        },
+        "test_raksa_regression.py:before": {
+            "provider": "docker", "status": "passed", "exit_code": 0,
+            "stdout": "Ran 1 test\nOK\n", "stderr": "",
+        },
+        "test_raksa_regression.py:after": {
+            "provider": "docker", "status": "passed", "exit_code": 0,
+            "stdout": "Ran 1 test\nOK\n", "stderr": "",
+        },
+    })
+    nebius = DummyNebius(
+        exploit_test={"path": "test_raksa_exploit.py", "content": EXPLOIT_TEST_CONTENT, "reason": "exploit"},
+        regression_tests=[
+            {"path": "test_raksa_regression.py", "content": invalid_test, "reason": "attempt 1"},
+            {"path": "test_raksa_regression.py", "content": CHARACTERIZATION_TEST_CONTENT, "reason": "attempt 2"},
+        ],
+    )
+
+    result = await verify_remediation(files, patched_files, findings, sandbox, nebius)
+
+    assert len(nebius.regression_calls) == 2
+    assert "socket" in nebius.regression_calls[1]["retry_error"]
+    assert result.status == "verified"
+    assert result.eligible_for_pr is True
+    assert result.regression_tests.status == "passed"
+    assert result.regression_tests.passed is True
+
+
+@pytest.mark.asyncio
+async def test_generated_regression_tests_zero_tests_executed() -> None:
+    """When generated test executes 0 tests in the sandbox, it retries once; if still 0 tests, reported as unavailable."""
+    files = {"app.py": VULNERABLE_SOURCE}
+    patched_files = {"app.py": FIXED_SOURCE}
+    findings = [{"id": "sqli-1", "path": "app.py", "line": 2, "evidence": "def search(connection, name):"}]
+
+    sandbox = DummySandbox(responses={
+        "test_raksa_exploit.py:before": {
+            "provider": "docker", "status": "failed", "exit_code": 1,
+            "stdout": "Ran 1 test\nFAILED\n",
+            "stderr": "AssertionError: 3 != 0 : SQL injection payload returned unintended rows",
+        },
+        "test_raksa_exploit.py:after": {
+            "provider": "docker", "status": "passed", "exit_code": 0,
+            "stdout": "Ran 1 test\nOK\n", "stderr": "",
+        },
+        "test_raksa_regression.py:before": {
+            "provider": "docker", "status": "passed", "exit_code": 0,
+            "stdout": "Ran 0 tests in 0.000s\nOK\n", "stderr": "",
+        },
+    })
+    nebius = DummyNebius(
+        exploit_test={"path": "test_raksa_exploit.py", "content": EXPLOIT_TEST_CONTENT, "reason": "exploit"},
+        regression_test={"path": "test_raksa_regression.py", "content": CHARACTERIZATION_TEST_CONTENT, "reason": "characterization"},
+    )
+
+    result = await verify_remediation(files, patched_files, findings, sandbox, nebius)
+
+    assert len(nebius.regression_calls) == 2
+    assert "zero tests" in nebius.regression_calls[1]["retry_error"].lower()
+    assert result.status == "verified"
+    assert result.eligible_for_pr is True
+    assert result.regression_tests.status == "unavailable"
+    assert result.regression_tests.passed is False
+    assert "zero tests" in result.regression_tests.message.lower()
+
+
+@pytest.mark.asyncio
+async def test_generated_regression_tests_baseline_failure() -> None:
+    """When generated characterization test fails against original unpatched baseline, it is retried once; if still failing, reported as unavailable."""
+    files = {"app.py": VULNERABLE_SOURCE}
+    patched_files = {"app.py": FIXED_SOURCE}
+    findings = [{"id": "sqli-1", "path": "app.py", "line": 2, "evidence": "def search(connection, name):"}]
+
+    sandbox = DummySandbox(responses={
+        "test_raksa_exploit.py:before": {
+            "provider": "docker", "status": "failed", "exit_code": 1,
+            "stdout": "Ran 1 test\nFAILED\n",
+            "stderr": "AssertionError: 3 != 0 : SQL injection payload returned unintended rows",
+        },
+        "test_raksa_exploit.py:after": {
+            "provider": "docker", "status": "passed", "exit_code": 0,
+            "stdout": "Ran 1 test\nOK\n", "stderr": "",
+        },
+        "test_raksa_regression.py:before": {
+            "provider": "docker", "status": "failed", "exit_code": 1,
+            "stdout": "Ran 1 test\nFAILED\n", "stderr": "AssertionError: expected baseline data mismatch",
+        },
+    })
+    nebius = DummyNebius(
+        exploit_test={"path": "test_raksa_exploit.py", "content": EXPLOIT_TEST_CONTENT, "reason": "exploit"},
+        regression_test={"path": "test_raksa_regression.py", "content": CHARACTERIZATION_TEST_CONTENT, "reason": "characterization"},
+    )
+
+    result = await verify_remediation(files, patched_files, findings, sandbox, nebius)
+
+    assert len(nebius.regression_calls) == 2
+    assert "baseline" in nebius.regression_calls[1]["retry_error"].lower()
+    assert result.status == "verified"
+    assert result.eligible_for_pr is True
+    assert result.regression_tests.status == "unavailable"
+    assert result.regression_tests.passed is False
+    assert "baseline" in result.regression_tests.message.lower()
+
+
+@pytest.mark.asyncio
+async def test_generated_regression_tests_patched_regression_failure() -> None:
+    """When generated characterization test passes on baseline but fails after patch, verification reports a regression failure and blocks PR creation."""
+    files = {"app.py": VULNERABLE_SOURCE}
+    patched_files = {"app.py": FIXED_SOURCE}
+    findings = [{"id": "sqli-1", "path": "app.py", "line": 2, "evidence": "def search(connection, name):"}]
+
+    sandbox = DummySandbox(responses={
+        "test_raksa_exploit.py:before": {
+            "provider": "docker", "status": "failed", "exit_code": 1,
+            "stdout": "Ran 1 test\nFAILED\n",
+            "stderr": "AssertionError: 3 != 0 : SQL injection payload returned unintended rows",
+        },
+        "test_raksa_exploit.py:after": {
+            "provider": "docker", "status": "passed", "exit_code": 0,
+            "stdout": "Ran 1 test\nOK\n", "stderr": "",
+        },
+        "test_raksa_regression.py:before": {
+            "provider": "docker", "status": "passed", "exit_code": 0,
+            "stdout": "Ran 1 test\nOK\n", "stderr": "",
+        },
+        "test_raksa_regression.py:after": {
+            "provider": "docker", "status": "failed", "exit_code": 1,
+            "stdout": "Ran 1 test\nFAILED\n", "stderr": "AssertionError: normal search broke",
+        },
+    })
+    nebius = DummyNebius(
+        exploit_test={"path": "test_raksa_exploit.py", "content": EXPLOIT_TEST_CONTENT, "reason": "exploit"},
+        regression_test={"path": "test_raksa_regression.py", "content": CHARACTERIZATION_TEST_CONTENT, "reason": "characterization"},
+    )
+
+    result = await verify_remediation(files, patched_files, findings, sandbox, nebius)
+
+    assert result.status == "failed"
+    assert result.eligible_for_pr is False
+    assert result.regression_tests.status == "failed"
+    assert result.regression_tests.passed is False
+    assert "regression tests broke" in result.message.lower()
+
+
+@pytest.mark.asyncio
+async def test_generated_regression_tests_generation_unavailable() -> None:
+    """When nebius service returns None or is unconfigured, regression coverage is reported as unavailable without failing verification."""
+    files = {"app.py": VULNERABLE_SOURCE}
+    patched_files = {"app.py": FIXED_SOURCE}
+    findings = [{"id": "sqli-1", "path": "app.py", "line": 2, "evidence": "def search(connection, name):"}]
+
+    sandbox = DummySandbox(responses={
+        "test_raksa_exploit.py:before": {
+            "provider": "docker", "status": "failed", "exit_code": 1,
+            "stdout": "Ran 1 test\nFAILED\n",
+            "stderr": "AssertionError: 3 != 0 : SQL injection payload returned unintended rows",
+        },
+        "test_raksa_exploit.py:after": {
+            "provider": "docker", "status": "passed", "exit_code": 0,
+            "stdout": "Ran 1 test\nOK\n", "stderr": "",
+        },
+    })
+    nebius = DummyNebius(
+        exploit_test={"path": "test_raksa_exploit.py", "content": EXPLOIT_TEST_CONTENT, "reason": "exploit"},
+        regression_test=None,
+    )
+
+    result = await verify_remediation(files, patched_files, findings, sandbox, nebius)
+
+    assert result.status == "verified"
+    assert result.eligible_for_pr is True
+    assert result.regression_tests.status == "unavailable"
+    assert result.regression_tests.passed is False
+    assert "unavailable" in result.regression_tests.message.lower()
+    assert "regression test coverage is unavailable" in result.message.lower()
+
+
+def test_validate_regression_test_security_checks() -> None:
+    """Test safety constraints and validation rules on generated regression tests."""
+    finding = {"path": "app.py", "evidence": "def search(connection, name):"}
+
+    # 1. Disallowed network import
+    bad_network = "import requests\nimport unittest\nclass T(unittest.TestCase):\n def test_x(self):\n  self.assertEqual(1, 1)"
+    is_valid, msg = validate_regression_test(bad_network, target_path="app.py", finding=finding)
+    assert is_valid is False
+    assert "disallowed module" in msg.lower()
+
+    # 2. Disallowed subprocess import
+    bad_proc = "import subprocess\nimport unittest\nclass T(unittest.TestCase):\n def test_x(self):\n  self.assertEqual(1, 1)"
+    is_valid, msg = validate_regression_test(bad_proc, target_path="app.py", finding=finding)
+    assert is_valid is False
+    assert "disallowed module" in msg.lower()
+
+    # 3. Disallowed dangerous call (os.system)
+    bad_os = "import os\nimport unittest\nclass T(unittest.TestCase):\n def test_x(self):\n  os.system('id')\n  self.assertEqual(1, 1)"
+    is_valid, msg = validate_regression_test(bad_os, target_path="app.py", finding=finding)
+    assert is_valid is False
+    assert "disallowed call" in msg.lower()
+
+    # 4. Exploit payload in regression test
+    bad_payload = "import unittest\nfrom app import search\nclass T(unittest.TestCase):\n def test_x(self):\n  search(None, \"' OR 1=1 --\")\n  self.assertEqual(1, 1)"
+    is_valid, msg = validate_regression_test(bad_payload, target_path="app.py", finding=finding)
+    assert is_valid is False
+    assert "security exploit payload" in msg.lower()
+
+    # 5. Trivial assertion
+    trivial = "import unittest\nfrom app import search\nclass T(unittest.TestCase):\n def test_x(self):\n  search(None, 'alice')\n  self.assertTrue(False)"
+    is_valid, msg = validate_regression_test(trivial, target_path="app.py", finding=finding)
+    assert is_valid is False
+    assert "trivial assertion" in msg.lower()
+
+    # 6. Target code not exercised
+    no_target = "import unittest\nclass T(unittest.TestCase):\n def test_x(self):\n  self.assertEqual(len([1]), 1)"
+    is_valid, msg = validate_regression_test(no_target, target_path="app.py", finding=finding)
+    assert is_valid is False
+    assert "does not exercise target code" in msg.lower()
+
+    # 7. Local redefinition of target function from source
+    source = "def search(connection, name):\n return []"
+    redefined = "import unittest\ndef search(c, n):\n return []\nclass T(unittest.TestCase):\n def test_x(self):\n  self.assertEqual(search(None, 'a'), [])"
+    is_valid, msg = validate_regression_test(redefined, target_path="app.py", source=source)
+    assert is_valid is False
+    assert "redefines target function 'search'" in msg.lower()
+
+    # 8. Valid characterization test
+    is_valid, msg = validate_regression_test(CHARACTERIZATION_TEST_CONTENT, target_path="app.py", source=source, finding=finding)
+    assert is_valid is True
 
 
 @pytest.mark.asyncio
@@ -1356,3 +1747,86 @@ def test_query_result_var_of_unrelated_fn_still_rejected() -> None:
     )
     assert is_valid is False, f"Expected invalid (unrelated result), got: {reason}"
     assert "unrelated" in reason.lower(), f"Unexpected rejection reason: {reason}"
+
+
+# =========================================================================
+# Regression tests: diagnostic distinction for regression test generation
+# =========================================================================
+
+
+@pytest.mark.asyncio
+async def test_generated_regression_tests_diagnostics_distinction() -> None:
+    """Failures must explicitly distinguish empty model output, malformed JSON, missing fields, and rejected test content."""
+    files = {"app.py": VULNERABLE_SOURCE}
+    patched_files = {"app.py": FIXED_SOURCE}
+    findings = [{"id": "sqli-1", "path": "app.py", "line": 2, "evidence": "def search(connection, name):"}]
+
+    sandbox = DummySandbox(responses={
+        "test_raksa_exploit.py:before": {
+            "provider": "docker", "status": "failed", "exit_code": 1,
+            "stdout": "Ran 1 test\nFAILED\n",
+            "stderr": "AssertionError: 3 != 0 : SQL injection payload returned unintended rows",
+        },
+        "test_raksa_exploit.py:after": {
+            "provider": "docker", "status": "passed", "exit_code": 0,
+            "stdout": "Ran 1 test\nOK\n", "stderr": "",
+        },
+    })
+
+    # Case 1: Empty model output
+    nebius_empty = DummyNebius(
+        exploit_test={"path": "test_raksa_exploit.py", "content": EXPLOIT_TEST_CONTENT, "reason": "exploit"},
+        diagnostic_errors=["Empty model output: model returned an empty completion."],
+    )
+    res_empty = await verify_remediation(files, patched_files, findings, sandbox, nebius_empty)
+    assert res_empty.regression_tests.status == "unavailable"
+    assert "empty model output" in res_empty.regression_tests.message.lower()
+
+    # Case 2: Malformed JSON
+    nebius_malformed = DummyNebius(
+        exploit_test={"path": "test_raksa_exploit.py", "content": EXPLOIT_TEST_CONTENT, "reason": "exploit"},
+        diagnostic_errors=["Malformed JSON: model response could not be parsed as JSON: Expecting value"],
+    )
+    res_malformed = await verify_remediation(files, patched_files, findings, sandbox, nebius_malformed)
+    assert res_malformed.regression_tests.status == "unavailable"
+    assert "malformed json" in res_malformed.regression_tests.message.lower()
+
+    # Case 3: Missing fields
+    nebius_missing = DummyNebius(
+        exploit_test={"path": "test_raksa_exploit.py", "content": EXPLOIT_TEST_CONTENT, "reason": "exploit"},
+        diagnostic_errors=["Missing fields: model response missing non-empty 'content' string."],
+    )
+    res_missing = await verify_remediation(files, patched_files, findings, sandbox, nebius_missing)
+    assert res_missing.regression_tests.status == "unavailable"
+    assert "missing fields" in res_missing.regression_tests.message.lower()
+
+    # Case 4: Rejected test content
+    nebius_rejected = DummyNebius(
+        exploit_test={"path": "test_raksa_exploit.py", "content": EXPLOIT_TEST_CONTENT, "reason": "exploit"},
+        regression_test={"path": "test_raksa_regression.py", "content": "import socket\nimport unittest", "reason": "bad"},
+    )
+    res_rejected = await verify_remediation(files, patched_files, findings, sandbox, nebius_rejected)
+    assert res_rejected.regression_tests.status == "unavailable"
+    assert "rejected test content" in res_rejected.regression_tests.message.lower()
+
+
+def test_extract_json_payload_and_clean_code() -> None:
+    """extract_json_payload handles markdown code fences and clean_model_code trims trailing syntax artifacts."""
+    from app.services.nebius import _clean_model_code, extract_json_payload
+
+    # Normal JSON
+    assert extract_json_payload('{"path": "p.py", "content": "c"}') == {"path": "p.py", "content": "c"}
+
+    # Markdown fenced JSON
+    fenced = '```json\n{"path": "p.py", "content": "c"}\n```'
+    assert extract_json_payload(fenced) == {"path": "p.py", "content": "c"}
+
+    # Preceding/trailing conversational text
+    conversational = 'Here is the response:\n{"path": "p.py", "content": "c"}\nHope this helps!'
+    assert extract_json_payload(conversational) == {"path": "p.py", "content": "c"}
+
+    # Clean model code trailing quotes
+    code_with_trailing = 'import unittest\nif __name__ == "__main__":\n    unittest.main()",'
+    cleaned = _clean_model_code(code_with_trailing)
+    assert cleaned.endswith("unittest.main()")
+
