@@ -32,6 +32,19 @@ def extract_json_payload(raw_text: str) -> dict[str, Any]:
     return parsed
 
 
+def bind_missing_model_patch_path(proposal: Any, expected_path: str) -> Any:
+    """Bind omitted model output to the trusted caller-selected file only.
+
+    An explicit different path is never rewritten; strict path/context checks
+    in validate_patch_proposal remain responsible for rejecting it.
+    """
+    if isinstance(proposal, dict) and (
+        "path" not in proposal or proposal["path"] is None or proposal["path"] == ""
+    ):
+        return {**proposal, "path": expected_path}
+    return proposal
+
+
 def _clean_model_code(code: str) -> str:
     """Clean model code by trimming trailing escaped quotes or commas if syntax parsing fails."""
     import ast
@@ -95,6 +108,10 @@ class NebiusService:
             "enforce an allowed root and canonicalized paths; for command/code injection, avoid unsafe "
             "evaluation and shell execution. Do not merely suppress scanner warnings, delete functionality, "
             "replace dynamic input with hardcoded values, or introduce new dependencies unless necessary. "
+            "Any newly referenced Python module must be imported in the same replacement. "
+            "Do not swap eval() for returning raw input if it changes expected behavior, and do not "
+            "replace shell calls with unrestricted execution of user-selected commands. "
+            "If the safe policy or expected behavior is unknown, abstain rather than invent it. "
             "Return ONLY JSON with path, old_text, new_text, reason. old_text must match exactly once "
             "including indentation; new_text must be nonempty, different, and syntactically appropriate. "
             "If no safe fix can be proposed, use empty old_text and new_text. "
@@ -154,7 +171,9 @@ class NebiusService:
 
         try:
             data = json.loads(content)
-            proposal, validation_error = validate_patch_proposal(data, path, source)
+            proposal, validation_error = validate_patch_proposal(
+                bind_missing_model_patch_path(data, path), path, source
+            )
         except Exception as exc:
             proposal = None
             validation_error = f"Invalid JSON: model response could not be parsed as JSON: {exc}"
@@ -214,7 +233,9 @@ class NebiusService:
 
         try:
             retry_data = json.loads(retry_content)
-            retry_proposal, retry_error = validate_patch_proposal(retry_data, path, source)
+            retry_proposal, retry_error = validate_patch_proposal(
+                bind_missing_model_patch_path(retry_data, path), path, source
+            )
         except Exception as exc:
             retry_proposal = None
             retry_error = f"Invalid JSON: retry response could not be parsed as JSON: {exc}"
