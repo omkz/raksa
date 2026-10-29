@@ -46,9 +46,15 @@ scanner error, not an assertion that the repository is safe.
 - Python SQL injection findings from Raksa's existing AST analyzer retain their
   specialist differential exploit/regression verification gate.
 - OpenGrep findings can now receive **AI patch proposals** (requires Nemotron)
-  with exact source-context validation. These are **not verified** by the current
-  SQLi-only gate. Any scan with an accepted OpenGrep patch is **unverified**
-  and **ineligible for draft PR creation**, even when a SQLi patch is also present.
+  with exact source-context validation. A missing model-output `path` is bound
+  to the file selected by Raksa, never an arbitrary model path; an explicit
+  conflicting or unsafe path is rejected. Python replacements are additionally
+  syntax-parsed, and newly introduced standard-library module references must
+  have visible bindings/imports. These checks do **not** establish behavioral
+  equivalence, runtime correctness, or exploit mitigation.
+- These proposals are **not verified** by the current SQLi-only gate. Any
+  scan with an accepted OpenGrep patch is **unverified** and **ineligible for
+  draft PR creation**, even when a SQLi patch is also present.
 - XSS and Path Traversal rules are deliberately high-signal **sink patterns**,
   not complete taint-flow analysis. They cover browser DOM sinks and direct
   request-parameter file reads in selected Python/JS frameworks, but many
