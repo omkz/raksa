@@ -126,7 +126,8 @@ class OpenGrepScanner:
                 "--network", "none", "--memory", "768m", "--cpus", "1",
                 "--pids-limit", "128", "--cap-drop", "ALL",
                 "--security-opt", "no-new-privileges:true",
-                "--read-only", "--tmpfs", "/tmp:rw,nosuid,size=64m",
+                # The OpenGrep self-extracting binary unpacks into /tmp at startup.
+                "--read-only", "--tmpfs", "/tmp:rw,nosuid,size=512m",
                 "--user", f"{os.getuid()}:{os.getgid()}",
                 "-e", "HOME=/tmp", "-e", "XDG_CACHE_HOME=/tmp",
                 "-v", f"{workspace}:/workspace:ro",
