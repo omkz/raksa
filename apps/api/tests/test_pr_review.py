@@ -288,6 +288,7 @@ async def test_pr_scan_workflow_scans_revision_and_updates_check_run(
 async def test_pr_scan_workflow_clean_repository_reports_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(settings, "github_webhook_secret", "")
     clean_code = (
         "import sqlite3\n"
         "def query_user(user_id):\n"
@@ -342,6 +343,7 @@ async def test_pr_scan_workflow_clean_repository_reports_success(
 async def test_pr_scan_workflow_handles_unsupported_repo_actionably(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(settings, "github_webhook_secret", "")
     target_sha = "2222333344445555666677778888999900001111"
     err = GitHubAppError("No supported text source files found within the configured size limits.")
     mock_get_snapshot = AsyncMock(side_effect=err)
@@ -382,6 +384,7 @@ async def test_pr_scan_workflow_handles_unsupported_repo_actionably(
 async def test_check_run_creation_fails_with_missing_permissions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(settings, "github_webhook_secret", "")
     perm_err = GitHubAppError(
         "GitHub App lacks 'Checks: Read and write' permission for org/perm-repo. "
         "Please enable Checks (Read and write) in GitHub App settings."

@@ -38,6 +38,26 @@ def upgrade() -> None:
     op.add_column('workspaces', sa.Column('installation_id', sa.String(length=64), nullable=True))
     op.create_index(op.f('ix_workspaces_installation_id'), 'workspaces', ['installation_id'], unique=False)
 
+    # Ensure scan_jobs PR review columns exist
+    conn = op.get_bind()
+    insp = sa.inspect(conn)
+    scan_cols = [c["name"] for c in insp.get_columns("scan_jobs")]
+    if "scan_type" not in scan_cols:
+        op.add_column("scan_jobs", sa.Column("scan_type", sa.String(length=32), server_default="repository", nullable=False))
+    if "pr_number" not in scan_cols:
+        op.add_column("scan_jobs", sa.Column("pr_number", sa.Integer(), nullable=True))
+    if "head_sha" not in scan_cols:
+        op.add_column("scan_jobs", sa.Column("head_sha", sa.String(length=64), nullable=True))
+    if "check_run_id" not in scan_cols:
+        op.add_column("scan_jobs", sa.Column("check_run_id", sa.BigInteger(), nullable=True))
+    if "delivery_id" not in scan_cols:
+        op.add_column("scan_jobs", sa.Column("delivery_id", sa.String(length=64), nullable=True))
+    scan_indexes = [i["name"] for i in insp.get_indexes("scan_jobs")]
+    if op.f("ix_scan_jobs_head_sha") not in scan_indexes:
+        op.create_index(op.f("ix_scan_jobs_head_sha"), "scan_jobs", ["head_sha"], unique=False)
+    if op.f("ix_scan_jobs_delivery_id") not in scan_indexes:
+        op.create_index(op.f("ix_scan_jobs_delivery_id"), "scan_jobs", ["delivery_id"], unique=False)
+
     # Clean up any legacy/orphan owner_id references in workspaces before applying FK constraint
     op.execute("UPDATE workspaces SET owner_id = NULL WHERE owner_id IS NOT NULL AND owner_id NOT IN (SELECT id FROM users)")
 
