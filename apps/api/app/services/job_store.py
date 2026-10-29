@@ -118,6 +118,7 @@ async def update_job(
         stmt = (
             select(ScanJob)
             .where(ScanJob.id == scan_id)
+            .with_for_update()
             .options(selectinload(ScanJob.findings))
         )
         result = await session.execute(stmt)
@@ -133,6 +134,14 @@ async def update_job(
                 )
                 logger.warning(msg)
                 raise JobOwnershipError(msg)
+
+        new_status = updates.get("status")
+        if new_status in {"completed", "failed"}:
+            if not job.completed_at:
+                job.completed_at = utc_now()
+            job.locked_by = None
+            job.locked_at = None
+            job.heartbeat_at = None
 
         for key, val in updates.items():
             if key in {"findings", "id", "audit_events", "created_at", "updated_at"}:
@@ -208,14 +217,11 @@ async def claim_next_job(worker_id: str) -> dict[str, Any] | None:
                 ScanJob.status == "queued",
                 ScanJob.scheduled_at <= now,
             )
+            .with_for_update(skip_locked=True)
             .options(selectinload(ScanJob.findings))
             .order_by(ScanJob.scheduled_at.asc())
             .limit(1)
         )
-        # Apply row-level lock if supported by database dialect
-        if session.bind and session.bind.dialect.name == "postgresql":
-            stmt = stmt.with_for_update(skip_locked=True)
-
         result = await session.execute(stmt)
         job = result.scalar_one_or_none()
         if not job:
@@ -246,10 +252,10 @@ async def heartbeat_job(scan_id: str, worker_id: str) -> bool:
     """Update heartbeat timestamp of an active job to prove worker liveness."""
     async with async_session_scope() as session:
         now = utc_now()
-        stmt = select(ScanJob).where(ScanJob.id == scan_id, ScanJob.locked_by == worker_id)
+        stmt = select(ScanJob).where(ScanJob.id == scan_id).with_for_update()
         result = await session.execute(stmt)
         job = result.scalar_one_or_none()
-        if job and job.status == "running":
+        if job and job.status == "running" and job.locked_by == worker_id:
             job.heartbeat_at = now
             return True
         return False
@@ -266,6 +272,7 @@ async def complete_job(
         stmt = (
             select(ScanJob)
             .where(ScanJob.id == scan_id)
+            .with_for_update()
             .options(selectinload(ScanJob.findings))
         )
         result = await session.execute(stmt)
@@ -273,7 +280,7 @@ async def complete_job(
         if not job:
             return False
 
-        if worker_id is not None and job.locked_by != worker_id:
+        if worker_id is not None and (job.locked_by != worker_id or job.status != "running"):
             logger.warning(
                 f"Fencing reject: worker {worker_id} cannot complete job {scan_id}; "
                 f"lock currently held by {job.locked_by!r} (status={job.status})"
@@ -317,13 +324,13 @@ async def fail_job(
 ) -> bool:
     """Fail a job or reschedule it if retryable within bounded max attempts. Returns True if updated, False if fenced out."""
     async with async_session_scope() as session:
-        stmt = select(ScanJob).where(ScanJob.id == scan_id)
+        stmt = select(ScanJob).where(ScanJob.id == scan_id).with_for_update()
         result = await session.execute(stmt)
         job = result.scalar_one_or_none()
         if not job:
             return False
 
-        if worker_id is not None and job.locked_by != worker_id:
+        if worker_id is not None and (job.locked_by != worker_id or job.status != "running"):
             logger.warning(
                 f"Fencing reject: worker {worker_id} cannot fail job {scan_id}; "
                 f"lock currently held by {job.locked_by!r} (status={job.status})"
@@ -386,10 +393,10 @@ async def release_job(
 ) -> bool:
     """Release a running job back to queued so another worker can immediately recover it."""
     async with async_session_scope() as session:
-        stmt = select(ScanJob).where(ScanJob.id == scan_id, ScanJob.locked_by == worker_id)
+        stmt = select(ScanJob).where(ScanJob.id == scan_id).with_for_update()
         result = await session.execute(stmt)
         job = result.scalar_one_or_none()
-        if not job or job.status != "running":
+        if not job or job.locked_by != worker_id or job.status != "running":
             return False
 
         if job.attempts > 0:
@@ -421,16 +428,17 @@ async def reap_stale_jobs(stale_threshold_seconds: int = 180) -> list[str]:
     reaped_ids: list[str] = []
     async with async_session_scope() as session:
         cutoff = utc_now() - timedelta(seconds=stale_threshold_seconds)
-        stmt = select(ScanJob).where(
-            ScanJob.status == "running",
-            or_(
-                ScanJob.heartbeat_at < cutoff,
-                and_(ScanJob.heartbeat_at.is_(None), ScanJob.locked_at < cutoff),
-            ),
+        stmt = (
+            select(ScanJob)
+            .where(
+                ScanJob.status == "running",
+                or_(
+                    ScanJob.heartbeat_at < cutoff,
+                    and_(ScanJob.heartbeat_at.is_(None), ScanJob.locked_at < cutoff),
+                ),
+            )
+            .with_for_update(skip_locked=True)
         )
-        if session.bind and session.bind.dialect.name == "postgresql":
-            stmt = stmt.with_for_update(skip_locked=True)
-
         result = await session.execute(stmt)
         stale_jobs = result.scalars().all()
 

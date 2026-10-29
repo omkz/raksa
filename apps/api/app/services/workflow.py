@@ -10,7 +10,7 @@ from app.services.nebius import NebiusUnavailable, nebius
 from app.services.sandbox import sandbox
 from app.services.tavily import tavily
 from app.services.verifier import verify_remediation
-from app.state import JobOwnershipError, update_job
+from app.state import JobOwnershipError, complete_job, fail_job, update_job
 
 logger = logging.getLogger("raksa.workflow")
 
@@ -176,12 +176,11 @@ async def run_scan_job(
                 "eligible_for_pr": False,
             }
 
-        await update_job(
+        await complete_job(
             scan_id,
-            expected_worker_id=worker_id,
-            status="completed",
-            stage="complete",
+            worker_id=worker_id,
             message="Analysis finished.",
+            stage="complete",
             findings=findings,
             patches=proposals,
             patched_files=patched_files if changed_files else {},
@@ -197,17 +196,14 @@ async def run_scan_job(
         logger.warning(f"Scan job {scan_id} aborted: worker {worker_id} lost ownership lock.")
         raise
     except Exception as exc:
-        try:
-            await update_job(
+        if worker_id is None:
+            # Standalone call without a worker queue runner
+            await fail_job(
                 scan_id,
-                expected_worker_id=worker_id,
-                status="failed",
-                stage="failed",
-                message="Repository analysis failed.",
+                worker_id=None,
                 error=f"{exc.__class__.__name__}: {exc}",
+                retryable=False,
             )
-        except JobOwnershipError:
-            pass
         raise
 
 

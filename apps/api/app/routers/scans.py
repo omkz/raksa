@@ -35,7 +35,7 @@ async def create_scan(payload: ScanRequest, request: Request) -> dict[str, objec
 async def get_scan(scan_id: str) -> dict[str, object]:
     job = await get_job(scan_id)
     if not job:
-        raise HTTPException(404, "Scan not found or expired after API restart.")
+        raise HTTPException(404, "Scan not found.")
     return public_job(job)
 
 
@@ -49,7 +49,7 @@ async def get_scan_events(scan_id: str) -> dict[str, object]:
 async def create_pull_request(scan_id: str, payload: CreatePRRequest, request: Request) -> dict[str, str]:
     job = await get_job(scan_id)
     if not job:
-        raise HTTPException(404, "Scan not found or expired after API restart.")
+        raise HTTPException(404, "Scan not found.")
     if job.get("status") != "completed":
         raise HTTPException(409, "Wait for the scan to complete before creating a pull request.")
     if not (job.get("verification") or {}).get("eligible_for_pr"):

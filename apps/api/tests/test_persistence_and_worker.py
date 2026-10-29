@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete
 
 from app.config import settings
 from app.db.models import ScanJob, Workspace
@@ -32,15 +31,6 @@ from app.services.worker import ScanWorker, start_embedded_worker, stop_embedded
 
 def gen_id(prefix: str = "test") -> str:
     return f"{prefix}-{uuid.uuid4().hex[:10]}"
-
-
-@pytest.fixture(autouse=True)
-async def clean_database_jobs() -> None:
-    async with async_session_scope() as session:
-        await session.execute(delete(ScanJob))
-    yield
-    async with async_session_scope() as session:
-        await session.execute(delete(ScanJob))
 
 
 @pytest.mark.asyncio
@@ -258,15 +248,15 @@ async def test_audit_events_recorded_and_queried_via_api() -> None:
         details={"note": "Manual review started"},
     )
 
-    client = TestClient(app)
-    response = client.get(f"/api/scans/{scan_id}/events")
-    assert response.status_code == 200
-    data = response.json()
-    assert data["scan_id"] == scan_id
-    events = data["events"]
-    assert len(events) >= 1
-    event_types = [e["event_type"] for e in events]
-    assert "scan.custom_action" in event_types
+    with TestClient(app) as client:
+        response = client.get(f"/api/scans/{scan_id}/events")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["scan_id"] == scan_id
+        events = data["events"]
+        assert len(events) >= 1
+        event_types = [e["event_type"] for e in events]
+        assert "scan.custom_action" in event_types
 
 
 @pytest.mark.asyncio
@@ -360,6 +350,14 @@ async def test_expired_worker_fenced_out_from_updating_job() -> None:
     # Worker A attempts to fail the job
     failed = await fail_job(scan_id, worker_id=worker_a, error="Worker A crashed", retryable=False)
     assert failed is False
+
+    # Worker A attempts to release the job
+    released = await release_job(scan_id, worker_id=worker_a, reason="Worker A stopping")
+    assert released is False
+
+    # Worker A attempts to heartbeat the job
+    heartbeat_ok = await heartbeat_job(scan_id, worker_id=worker_a)
+    assert heartbeat_ok is False
 
     # Verify Worker B's lock and running status remain uncorrupted
     current = await get_job(scan_id)
@@ -471,13 +469,212 @@ async def test_concurrent_job_claims_guarantee_single_consumer() -> None:
 async def test_embedded_worker_disabled_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "worker_enabled", False)
 
-    client = TestClient(app)
-    response = client.get("/api/health")
-    assert response.status_code == 200
-    data = response.json()
-    assert data["integrations"]["embedded_worker"] is False
+    with TestClient(app) as client:
+        response = client.get("/api/health")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["integrations"]["embedded_worker"] is False
 
     # start_embedded_worker should be a no-op when worker_enabled=False
     worker = await start_embedded_worker()
     assert worker._running is False
     await stop_embedded_worker()
+
+
+@pytest.mark.asyncio
+async def test_job_transitions_consistently_clear_locks() -> None:
+    # 1. Successful completion clears locks and sets completed_at
+    scan_completed = gen_id("trans-comp")
+    worker_1 = gen_id("worker-trans1")
+    await create_scan_job(scan_id=scan_completed, installation_id="111", full_name="org/trans1")
+    claimed_1 = await claim_next_job(worker_1)
+    assert claimed_1 is not None
+    assert claimed_1["locked_by"] == worker_1
+    assert claimed_1["locked_at"] is not None
+    assert claimed_1["heartbeat_at"] is not None
+
+    ok = await complete_job(scan_completed, worker_id=worker_1, message="Done cleanly")
+    assert ok is True
+    res_comp = await get_job(scan_completed)
+    assert res_comp is not None
+    assert res_comp["status"] == "completed"
+    assert res_comp["completed_at"] is not None
+    assert res_comp["locked_by"] is None
+    assert res_comp["locked_at"] is None
+    assert res_comp["heartbeat_at"] is None
+
+    # 2. Terminal failure clears locks and sets completed_at
+    scan_failed = gen_id("trans-fail")
+    worker_2 = gen_id("worker-trans2")
+    await create_scan_job(scan_id=scan_failed, installation_id="222", full_name="org/trans2")
+    claimed_2 = await claim_next_job(worker_2)
+    assert claimed_2 is not None
+
+    ok = await fail_job(scan_failed, worker_id=worker_2, error="Non-recoverable fatal error", retryable=False)
+    assert ok is True
+    res_fail = await get_job(scan_failed)
+    assert res_fail is not None
+    assert res_fail["status"] == "failed"
+    assert res_fail["completed_at"] is not None
+    assert res_fail["locked_by"] is None
+    assert res_fail["locked_at"] is None
+    assert res_fail["heartbeat_at"] is None
+
+    # 3. Retryable failure clears locks and keeps completed_at None
+    scan_retry = gen_id("trans-retry")
+    worker_3 = gen_id("worker-trans3")
+    await create_scan_job(scan_id=scan_retry, installation_id="333", full_name="org/trans3")
+    claimed_3 = await claim_next_job(worker_3)
+    assert claimed_3 is not None
+
+    ok = await fail_job(scan_retry, worker_id=worker_3, error="Temporary network outage", retryable=True)
+    assert ok is True
+    res_retry = await get_job(scan_retry)
+    assert res_retry is not None
+    assert res_retry["status"] == "queued"
+    assert res_retry["completed_at"] is None
+    assert res_retry["locked_by"] is None
+    assert res_retry["locked_at"] is None
+    assert res_retry["heartbeat_at"] is None
+    assert res_retry["scheduled_at"] is not None
+
+    # 4. Graceful release clears locks and resets to queued
+    scan_release = gen_id("trans-rel")
+    worker_4 = gen_id("worker-trans4")
+    await create_scan_job(scan_id=scan_release, installation_id="444", full_name="org/trans4")
+    claimed_4 = await claim_next_job(worker_4)
+    assert claimed_4 is not None
+
+    ok = await release_job(scan_release, worker_id=worker_4, reason="Graceful pod SIGTERM")
+    assert ok is True
+    res_rel = await get_job(scan_release)
+    assert res_rel is not None
+    assert res_rel["status"] == "queued"
+    assert res_rel["completed_at"] is None
+    assert res_rel["locked_by"] is None
+    assert res_rel["locked_at"] is None
+    assert res_rel["heartbeat_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_worker_failure_lifecycle_audit_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A retryable failure must record scan.started and scan.retrying, and NEVER record scan.failed
+    scan_retry = gen_id("lifecycle-retry")
+    await create_scan_job(scan_id=scan_retry, installation_id="111", full_name="org/retry-audit")
+
+    mock_retry_run = AsyncMock(side_effect=httpx.ConnectTimeout("Connection timed out"))
+    monkeypatch.setattr("app.services.worker.run_scan_job", mock_retry_run)
+
+    worker_1 = ScanWorker(worker_id=gen_id("test-worker-ret"), poll_interval=0.1)
+    processed = await worker_1.run_once()
+    assert processed is True
+
+    events_retry = await list_audit_events(scan_id=scan_retry)
+    event_types_retry = [e["event_type"] for e in events_retry]
+    assert "scan.started" in event_types_retry
+    assert "scan.retrying" in event_types_retry
+    assert "scan.failed" not in event_types_retry
+
+    # A non-retryable failure must record scan.started and exactly ONE scan.failed, and NEVER record scan.retrying
+    scan_fatal = gen_id("lifecycle-fatal")
+    await create_scan_job(scan_id=scan_fatal, installation_id="222", full_name="org/fatal-audit")
+
+    mock_fatal_run = AsyncMock(side_effect=ValueError("Invalid repo configuration"))
+    monkeypatch.setattr("app.services.worker.run_scan_job", mock_fatal_run)
+
+    worker_2 = ScanWorker(worker_id=gen_id("test-worker-fat"), poll_interval=0.1)
+    processed = await worker_2.run_once()
+    assert processed is True
+
+    events_fatal = await list_audit_events(scan_id=scan_fatal)
+    event_types_fatal = [e["event_type"] for e in events_fatal]
+    assert "scan.started" in event_types_fatal
+    assert event_types_fatal.count("scan.failed") == 1
+    assert "scan.retrying" not in event_types_fatal
+
+
+def test_stale_api_error_messages_updated() -> None:
+    with TestClient(app) as client:
+        # 1. Non-existent scan lookup
+        res_get = client.get("/api/scans/non-existent-scan-id")
+        assert res_get.status_code == 404
+        assert res_get.json()["detail"] == "Scan not found."
+        assert "restart" not in res_get.json()["detail"].lower()
+
+        # 2. Non-existent scan pull-request creation
+        res_pr = client.post(
+            "/api/scans/non-existent-scan-id/pull-request",
+            json={"title": "Fix SQLi", "body": "PR description"},
+        )
+        assert res_pr.status_code == 404
+        assert res_pr.json()["detail"] == "Scan not found."
+        assert "restart" not in res_pr.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_reclamation_and_stale_worker_rejection() -> None:
+    from sqlalchemy import select
+
+    scan_id = gen_id("race-fencing")
+    worker_stale = gen_id("worker-stale")
+    worker_reclaim = gen_id("worker-reclaim")
+
+    await create_scan_job(scan_id=scan_id, installation_id="111", full_name="org/race-repo")
+    claimed = await claim_next_job(worker_stale)
+    assert claimed is not None
+    assert claimed["locked_by"] == worker_stale
+
+    lock_acquired = asyncio.Event()
+
+    async def reclaiming_task() -> None:
+        async with async_session_scope() as session:
+            stmt = select(ScanJob).where(ScanJob.id == scan_id).with_for_update()
+            res = await session.execute(stmt)
+            job = res.scalar_one()
+            job.locked_by = worker_reclaim
+            job.attempts += 1
+            # Signal that the row lock is now held by reclaiming worker
+            lock_acquired.set()
+            # Hold lock open to force concurrent transactions to block in DB
+            await asyncio.sleep(0.2)
+            await session.flush()
+
+    async def stale_worker_task() -> bool:
+        await lock_acquired.wait()
+        # Small sleep ensures reclaiming_task is currently holding the DB row lock
+        await asyncio.sleep(0.05)
+        try:
+            await update_job(
+                scan_id,
+                expected_worker_id=worker_stale,
+                message="Malicious/stale update that must be blocked",
+            )
+            return False
+        except JobOwnershipError:
+            return True
+
+    _, stale_rejected = await asyncio.gather(reclaiming_task(), stale_worker_task())
+    assert stale_rejected is True
+
+    # Stale worker attempts to complete the job
+    comp_rejected = await complete_job(scan_id, worker_id=worker_stale, message="Stale complete")
+    assert comp_rejected is False
+
+    # Stale worker attempts to fail the job
+    fail_rejected = await fail_job(scan_id, worker_id=worker_stale, error="Stale fail", retryable=False)
+    assert fail_rejected is False
+
+    # Stale worker attempts to release the job
+    rel_rejected = await release_job(scan_id, worker_id=worker_stale, reason="Stale release")
+    assert rel_rejected is False
+
+    # Stale worker attempts to heartbeat
+    hb_rejected = await heartbeat_job(scan_id, worker_id=worker_stale)
+    assert hb_rejected is False
+
+    # Verify reclaiming worker's ownership is intact and message was not overwritten
+    final_job = await get_job(scan_id)
+    assert final_job is not None
+    assert final_job["locked_by"] == worker_reclaim
+    assert final_job["attempts"] == 2
+    assert "Malicious/stale update" not in final_job["message"]
