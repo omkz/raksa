@@ -41,6 +41,9 @@ class PatchProposal(BaseModel):
     old_text: str
     new_text: str
     reason: str
+    scanner: str | None = None
+    cwe: str | None = None
+    finding_id: str | None = None
 
 
 class VerificationCheckSchema(BaseModel):
