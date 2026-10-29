@@ -45,6 +45,44 @@ def bind_missing_model_patch_path(proposal: Any, expected_path: str) -> Any:
     return proposal
 
 
+def _model_patch_abstained(proposal: Any, expected_path: str) -> str | None:
+    """Recognize only an explicit abstention, not a missing/malformed JSON field.
+
+    The system prompt asks for BOTH replacement fields to be empty if a safe
+    remediation cannot be inferred. This is an expected no-patch outcome and
+    must not be retried as a schema error or presented as a verified fix.
+    """
+    if not isinstance(proposal, dict):
+        return None
+    if proposal.get("path") not in (None, "", expected_path):
+        return None
+    if "old_text" not in proposal or "new_text" not in proposal:
+        return None
+    if proposal["old_text"] != "" or proposal["new_text"] != "":
+        return None
+    raw_reason = proposal.get("reason")
+    reason = "No safe behavior-preserving patch could be inferred from the snapshot."
+    if isinstance(raw_reason, str) and raw_reason.strip():
+        reason = " ".join(raw_reason.split())[:240]
+    return f"AI abstained: {reason} No patch was applied or verified."
+
+
+def _model_patch_field_shape(proposal: Any) -> str:
+    """Report missing vs empty fields without logging potentially sensitive code."""
+    if not isinstance(proposal, dict):
+        return f"response type={type(proposal).__name__}"
+    statuses = []
+    for key in ("path", "old_text", "new_text", "reason"):
+        if key not in proposal:
+            status = "missing"
+        elif isinstance(proposal[key], str):
+            status = "empty" if not proposal[key] else "present"
+        else:
+            status = type(proposal[key]).__name__
+        statuses.append(f"{key}={status}")
+    return ", ".join(statuses)
+
+
 def _clean_model_code(code: str) -> str:
     """Clean model code by trimming trailing escaped quotes or commas if syntax parsing fails."""
     import ast
@@ -171,9 +209,16 @@ class NebiusService:
 
         try:
             data = json.loads(content)
+            abstention = _model_patch_abstained(data, path)
+            if abstention:
+                if diagnostics is not None:
+                    diagnostics.append(f"{path}: {abstention}")
+                return None
             proposal, validation_error = validate_patch_proposal(
                 bind_missing_model_patch_path(data, path), path, source
             )
+            if validation_error:
+                validation_error += f" (fields: {_model_patch_field_shape(data)})"
         except Exception as exc:
             proposal = None
             validation_error = f"Invalid JSON: model response could not be parsed as JSON: {exc}"
@@ -233,9 +278,16 @@ class NebiusService:
 
         try:
             retry_data = json.loads(retry_content)
+            abstention = _model_patch_abstained(retry_data, path)
+            if abstention:
+                if diagnostics is not None:
+                    diagnostics.append(f"{path}: AI abstained after retry. {abstention}")
+                return None
             retry_proposal, retry_error = validate_patch_proposal(
                 bind_missing_model_patch_path(retry_data, path), path, source
             )
+            if retry_error:
+                retry_error += f" (fields: {_model_patch_field_shape(retry_data)})"
         except Exception as exc:
             retry_proposal = None
             retry_error = f"Invalid JSON: retry response could not be parsed as JSON: {exc}"
