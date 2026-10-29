@@ -190,3 +190,68 @@ async def test_opengrep_only_finding_produces_unverified_patch(
     assert job["verification"]["eligible_for_pr"] is False
     assert job["verification"]["status"] == "unverified"
     gate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_missing_model_path_is_bound_to_trusted_finding_target() -> None:
+    """Nebius may omit path; the app chooses the already-scanned file, not the model."""
+    service = NebiusService()
+    mock_client = MagicMock()
+    source = (
+        "from flask import request\n"
+        "def read_file():\n"
+        '    with open(request.args.get("filename"), encoding="utf-8") as handle:\n'
+        "        return handle.read()\n"
+    )
+    pathless_patch = {
+        "old_text": 'open(request.args.get("filename"), encoding="utf-8")',
+        "new_text": 'open(allowed_file, encoding="utf-8")',
+        "reason": "Illustrative candidate only: requires behavioral verification",
+    }
+    mock_client.chat.completions.create = AsyncMock(
+        return_value=MagicMock(
+            choices=[MagicMock(message=MagicMock(content=json.dumps(pathless_patch)))]
+        )
+    )
+    service._client = MagicMock(return_value=mock_client)
+
+    proposal = await service.propose_patch(
+        path="src/unsafe_path.py", source=source,
+        finding={"scanner": "opengrep", "cwe": "CWE-22", "line": 3},
+    )
+    assert proposal is not None
+    assert proposal["path"] == "src/unsafe_path.py"
+    assert proposal["new_text"] == pathless_patch["new_text"]
+    mock_client.chat.completions.create.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_explicitly_wrong_model_path_is_not_overwritten() -> None:
+    """Do not turn an explicit model-selected different file into a valid patch."""
+    service = NebiusService()
+    mock_client = MagicMock()
+    source = "value = 1\n"
+    wrong_path = {
+        "path": "src/other.py",
+        "old_text": "value = 1",
+        "new_text": "value = 2",
+        "reason": "Wrong target",
+    }
+    mock_client.chat.completions.create = AsyncMock(
+        return_value=MagicMock(
+            choices=[MagicMock(message=MagicMock(content=json.dumps(wrong_path)))]
+        )
+    )
+    service._client = MagicMock(return_value=mock_client)
+    diagnostics: list[str] = []
+
+    proposal = await service.propose_patch(
+        path="src/expected.py", source=source,
+        finding={"scanner": "opengrep", "cwe": "CWE-22", "line": 1},
+        diagnostics=diagnostics,
+    )
+    assert proposal is None
+    assert mock_client.chat.completions.create.await_count == 2
+    assert len(diagnostics) == 1
+    assert "Wrong path" in diagnostics[0]
+    assert "src/other.py" in diagnostics[0]
