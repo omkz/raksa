@@ -3,8 +3,15 @@ from fastapi import APIRouter, HTTPException, Request
 from app.schemas import CreatePRRequest, ScanRequest
 from app.services.demo_proof import FIXED_SNIPPET, VULNERABLE_SNIPPET, run_demo_proof
 from app.services.github_app import GitHubAppError, github_app
-from app.services.workflow import new_scan_id, public_job, run_scan_job
-from app.state import get_job, put_job, update_job
+from app.services.job_store import (
+    create_scan_job,
+    get_job,
+    list_audit_events,
+    put_job,
+    record_audit_event,
+    update_job,
+)
+from app.services.workflow import new_scan_id, public_job
 
 router = APIRouter(prefix="/api/scans", tags=["scans"])
 
@@ -15,12 +22,12 @@ async def create_scan(payload: ScanRequest, request: Request) -> dict[str, objec
     if not installation_id:
         raise HTTPException(401, "Connect the Raksa GitHub App first.")
     scan_id = new_scan_id()
-    await put_job(scan_id, {
-        "id": scan_id, "status": "queued", "stage": "queued", "message": "Scan queued.",
-        "full_name": payload.full_name, "installation_id": str(installation_id),
-    })
-    import asyncio
-    asyncio.create_task(run_scan_job(scan_id, str(installation_id), payload.full_name))
+    await create_scan_job(
+        scan_id=scan_id,
+        installation_id=str(installation_id),
+        full_name=payload.full_name,
+        actor=f"installation:{installation_id}",
+    )
     return {"id": scan_id, "status": "queued"}
 
 
@@ -30,6 +37,12 @@ async def get_scan(scan_id: str) -> dict[str, object]:
     if not job:
         raise HTTPException(404, "Scan not found or expired after API restart.")
     return public_job(job)
+
+
+@router.get("/{scan_id}/events")
+async def get_scan_events(scan_id: str) -> dict[str, object]:
+    events = await list_audit_events(scan_id=scan_id)
+    return {"scan_id": scan_id, "events": events}
 
 
 @router.post("/{scan_id}/pull-request")
@@ -48,14 +61,29 @@ async def create_pull_request(scan_id: str, payload: CreatePRRequest, request: R
         raise HTTPException(409, "This scan has no verified code changes to publish.")
     try:
         pr = await github_app.create_pull_request(
-            str(installation_id), str(job["full_name"]),
+            str(installation_id),
+            str(job["full_name"]),
             expected_base_sha=str(job["base_sha"]),
-            files=dict(job["changed_files"]), title=payload.title, body=payload.body, scan_id=scan_id,
+            files=dict(job["changed_files"]),
+            title=payload.title,
+            body=payload.body,
+            scan_id=scan_id,
         )
     except GitHubAppError as exc:
         raise HTTPException(409 if "changed after this scan" in str(exc) else 502, str(exc)) from exc
-    await update_job(scan_id, pull_request_url=pr.get("html_url"), stage="pull_request_created",
-                     message="A draft pull request was created. Review it before merging.")
+
+    await update_job(
+        scan_id,
+        pull_request_url=pr.get("html_url"),
+        stage="pull_request_created",
+        message="A draft pull request was created. Review it before merging.",
+    )
+    await record_audit_event(
+        event_type="pull_request.created",
+        scan_id=scan_id,
+        actor=f"installation:{installation_id}",
+        details={"html_url": pr.get("html_url"), "branch": pr.get("branch")},
+    )
     return {"url": str(pr.get("html_url", "")), "branch": str(pr.get("branch", ""))}
 
 
@@ -69,19 +97,40 @@ async def run_demo() -> dict[str, object]:
         + "\n+" + FIXED_SNIPPET.replace("\n", "\n+") + "\n"
     )
     job = {
-        "id": scan_id, "status": "completed", "stage": "complete",
-        "message": "Controlled SQL injection demo completed.", "full_name": None,
+        "id": scan_id,
+        "status": "completed",
+        "stage": "complete",
+        "message": "Controlled SQL injection demo completed.",
+        "full_name": None,
         "findings": [{
-            "id": "demo-sqli", "title": "SQL Injection", "severity": "high", "cwe": "CWE-89",
-            "path": "app.py", "line": 1, "evidence": VULNERABLE_SNIPPET.splitlines()[0],
+            "id": "demo-sqli",
+            "title": "SQL Injection",
+            "severity": "high",
+            "cwe": "CWE-89",
+            "path": "app.py",
+            "line": 1,
+            "evidence": VULNERABLE_SNIPPET.splitlines()[0],
             "description": "A controlled SQLite proof shows that string interpolation lets the payload alter query semantics.",
-            "confidence": 1.0, "status": "reproduced",
+            "confidence": 1.0,
+            "status": "reproduced",
         }],
-        "patches": [{"path": "app.py", "old_text": VULNERABLE_SNIPPET, "new_text": FIXED_SNIPPET,
-                     "reason": "Use a parameterized SQL query so user input is treated as data."}],
-        "diff": diff, "research": [], "summary": "This demo is a deterministic SQLite proof, not an LLM claim.",
+        "patches": [{
+            "path": "app.py",
+            "old_text": VULNERABLE_SNIPPET,
+            "new_text": FIXED_SNIPPET,
+            "reason": "Use a parameterized SQL query so user input is treated as data.",
+        }],
+        "diff": diff,
+        "research": [],
+        "summary": "This demo is a deterministic SQLite proof, not an LLM claim.",
         "verification": {**result, "eligible_for_pr": False, "provider": "local-proof-harness"},
         "pull_request_url": None,
     }
     await put_job(scan_id, job)
+    await record_audit_event(
+        event_type="scan.demo_completed",
+        scan_id=scan_id,
+        actor="demo",
+        details={"verification": result},
+    )
     return public_job(job)

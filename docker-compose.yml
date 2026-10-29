@@ -1,4 +1,21 @@
 services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: raksa
+      POSTGRES_USER: raksa
+      POSTGRES_PASSWORD: raksa
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U raksa -d raksa"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   api:
     build:
       context: .
@@ -7,12 +24,16 @@ services:
     environment:
       FRONTEND_URL: http://localhost:5173
       CORS_ORIGINS: http://localhost:5173
+      DATABASE_URL: postgresql+asyncpg://raksa:raksa@db:5432/raksa
     volumes:
       - ./apps/api:/app/apps/api
       - ./examples:/app/examples:ro
       - ./.env:/app/.env:ro
     ports:
       - "127.0.0.1:8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
 
   web:
     build:
@@ -27,3 +48,6 @@ services:
       - "127.0.0.1:5173:5173"
     depends_on:
       - api
+
+volumes:
+  postgres_data:

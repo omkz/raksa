@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     max_repository_bytes: int = 1_200_000
     max_findings: int = 10
 
+    database_url: str = "postgresql+asyncpg://raksa:raksa@localhost:5432/raksa"
+    worker_enabled: bool = True
+    worker_poll_interval_seconds: float = 1.0
+    worker_heartbeat_interval_seconds: float = 5.0
+    worker_stale_timeout_seconds: int = 180
+    worker_max_attempts: int = 3
+
     model_config = SettingsConfigDict(
         env_file=str(ROOT_DIR / ".env"),
         env_file_encoding="utf-8",
@@ -44,6 +51,15 @@ class Settings(BaseSettings):
     @property
     def allowed_origins(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def async_database_url(self) -> str:
+        url = self.database_url.strip()
+        if url.startswith("postgresql://"):
+            return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        if url.startswith("postgres://"):
+            return url.replace("postgres://", "postgresql+asyncpg://", 1)
+        return url
 
     @property
     def resolved_github_private_key(self) -> str:

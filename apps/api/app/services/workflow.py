@@ -1,4 +1,5 @@
 import difflib
+import logging
 import uuid
 from typing import Any
 
@@ -9,11 +10,25 @@ from app.services.nebius import NebiusUnavailable, nebius
 from app.services.sandbox import sandbox
 from app.services.tavily import tavily
 from app.services.verifier import verify_remediation
-from app.state import update_job
+from app.state import JobOwnershipError, update_job
+
+logger = logging.getLogger("raksa.workflow")
 
 
-async def run_scan_job(scan_id: str, installation_id: str, full_name: str) -> None:
-    await update_job(scan_id, status="running", stage="fetching", message="Fetching a bounded repository snapshot…")
+async def run_scan_job(
+    scan_id: str,
+    installation_id: str,
+    full_name: str,
+    *,
+    worker_id: str | None = None,
+) -> None:
+    await update_job(
+        scan_id,
+        expected_worker_id=worker_id,
+        status="running",
+        stage="fetching",
+        message="Fetching a bounded repository snapshot…",
+    )
     try:
         files, repo_meta, base_sha = await github_app.get_snapshot(
             installation_id,
@@ -23,8 +38,13 @@ async def run_scan_job(scan_id: str, installation_id: str, full_name: str) -> No
             max_repository_bytes=settings.max_repository_bytes,
         )
         await update_job(
-            scan_id, full_name=full_name, default_branch=repo_meta.get("default_branch", "main"),
-            base_sha=base_sha, status="running", stage="analyzing",
+            scan_id,
+            expected_worker_id=worker_id,
+            full_name=full_name,
+            default_branch=repo_meta.get("default_branch", "main"),
+            base_sha=base_sha,
+            status="running",
+            stage="analyzing",
             message=f"Analyzing {len(files)} source and test files for potential SQL injection…",
             source_files=files,
         )
@@ -50,7 +70,12 @@ async def run_scan_job(scan_id: str, installation_id: str, full_name: str) -> No
         patched_files = dict(files)
         patch_messages: list[str] = []
         if findings and nebius.configured:
-            await update_job(scan_id, stage="remediating", message="Requesting a constrained remediation proposal from Nemotron…")
+            await update_job(
+                scan_id,
+                expected_worker_id=worker_id,
+                stage="remediating",
+                message="Requesting a constrained remediation proposal from Nemotron…",
+            )
             for finding in findings[:3]:
                 path = finding.get("path", "")
                 source = files.get(path, "")
@@ -96,7 +121,12 @@ async def run_scan_job(scan_id: str, installation_id: str, full_name: str) -> No
         }
 
         if changed_files:
-            await update_job(scan_id, stage="verifying", message=f"Running security verification gate via {settings.sandbox_provider}…")
+            await update_job(
+                scan_id,
+                expected_worker_id=worker_id,
+                stage="verifying",
+                message=f"Running security verification gate via {settings.sandbox_provider}…",
+            )
             gate_result = await verify_remediation(
                 files=files,
                 patched_files=patched_files,
@@ -147,14 +177,38 @@ async def run_scan_job(scan_id: str, installation_id: str, full_name: str) -> No
             }
 
         await update_job(
-            scan_id, status="completed", stage="complete", message="Analysis finished.",
-            findings=findings, patches=proposals, patched_files=patched_files if changed_files else {},
-            changed_files=changed_files, diff=patch_diff, research=research, summary=summary,
-            verification=verification, patch_messages=patch_messages,
+            scan_id,
+            expected_worker_id=worker_id,
+            status="completed",
+            stage="complete",
+            message="Analysis finished.",
+            findings=findings,
+            patches=proposals,
+            patched_files=patched_files if changed_files else {},
+            changed_files=changed_files,
+            diff=patch_diff,
+            research=research,
+            summary=summary,
+            verification=verification,
+            patch_messages=patch_messages,
             source_files=files,
         )
+    except JobOwnershipError:
+        logger.warning(f"Scan job {scan_id} aborted: worker {worker_id} lost ownership lock.")
+        raise
     except Exception as exc:
-        await update_job(scan_id, status="failed", stage="failed", message="Repository analysis failed.", error=f"{exc.__class__.__name__}: {exc}")
+        try:
+            await update_job(
+                scan_id,
+                expected_worker_id=worker_id,
+                status="failed",
+                stage="failed",
+                message="Repository analysis failed.",
+                error=f"{exc.__class__.__name__}: {exc}",
+            )
+        except JobOwnershipError:
+            pass
+        raise
 
 
 def _unified_diff(original: dict[str, str], modified: dict[str, str]) -> str:
