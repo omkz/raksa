@@ -151,7 +151,7 @@ def test_docker_runner_has_enough_tmpfs_space_without_relaxing_isolation(
 
     assert result == {"results": [], "errors": []}
     cmd = executed[0]
-    assert cmd[cmd.index("--tmpfs") + 1] == "/tmp:rw,nosuid,size=512m"
+    assert cmd[cmd.index("--tmpfs") + 1] == "/tmp:rw,exec,nosuid,nodev,size=512m,mode=1777"
     assert cmd[cmd.index("--network") + 1] == "none"
     assert "--read-only" in cmd
     assert cmd[cmd.index("--pull") + 1] == "never"
