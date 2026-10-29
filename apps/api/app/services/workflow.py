@@ -153,7 +153,7 @@ async def run_scan_job(
             "eligible_for_pr": False,
         }
 
-        if changed_files and not any(p.get("scanner") == "opengrep" for p in proposals):
+        if changed_files and not any(p.get("scanner") != "raksa" for p in proposals):
             await update_job(
                 scan_id,
                 expected_worker_id=worker_id,
