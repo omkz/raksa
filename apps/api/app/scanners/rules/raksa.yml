@@ -19,3 +19,38 @@ rules:
     pattern-either:
       - pattern: eval($EXPRESSION)
       - pattern: new Function(...)
+
+  # High-signal sink patterns. These are potential issues, NOT proof that input
+  # is attacker-controlled or that any security boundary was bypassed.
+  - id: raksa.javascript-html-injection
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: "Potential XSS: HTML is injected into a DOM sink; verify source and sanitization."
+    metadata:
+      cwe: CWE-79
+    pattern-either:
+      - pattern: $NODE.innerHTML = $HTML
+      - pattern: $NODE.outerHTML = $HTML
+      - pattern: $NODE.insertAdjacentHTML($POSITION, $HTML)
+  - id: raksa.python-request-file-access
+    languages: [python]
+    severity: WARNING
+    message: "Potential path traversal: request parameter flows directly into a file read."
+    metadata:
+      cwe: CWE-22
+    pattern-either:
+      - pattern: open(request.args[$KEY], ...)
+      - pattern: open(request.args.get($KEY), ...)
+      - pattern: Path(request.args[$KEY]).read_text(...)
+      - pattern: Path(request.args.get($KEY)).read_text(...)
+  - id: raksa.javascript-request-file-access
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: "Potential path traversal: request parameter is used directly as a file path."
+    metadata:
+      cwe: CWE-22
+    pattern-either:
+      - pattern: fs.readFileSync(req.query.$KEY, ...)
+      - pattern: fs.readFileSync(req.params.$KEY, ...)
+      - pattern: fs.readFile(req.query.$KEY, ...)
+      - pattern: fs.readFile(req.params.$KEY, ...)

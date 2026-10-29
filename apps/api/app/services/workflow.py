@@ -67,7 +67,7 @@ async def run_scan_job(
             base_sha=base_sha,
             status="running",
             stage="analyzing",
-            message=f"Analyzing {len(files)} source and test files for potential SQL injection…",
+            message=f"Analyzing {len(files)} source and test files for potential security findings…",
             source_files=files,
         )
         native_findings = detect_sql_injection(files, max_findings=settings.max_findings)
@@ -85,26 +85,26 @@ async def run_scan_job(
                 research = [{"title": "Security research unavailable", "url": "", "content": f"Tavily request failed: {exc.__class__.__name__}"}]
 
         summary = ""
-        if native_findings and nebius.configured:
+        if findings and nebius.configured:
             try:
-                summary = await nebius.summarize_findings(native_findings, files)
+                summary = await nebius.summarize_findings(findings, files)
             except NebiusUnavailable as exc:
                 summary = str(exc)
         elif not nebius.configured:
             summary = "Nemotron analysis skipped: configure NEBIUS_API_KEY to enable model reasoning and patch proposals."
 
         proposals: list[dict[str, str]] = []
-        candidate_proposals: list[dict[str, str]] = []
+        candidate_proposals: list[tuple[dict[str, str], dict[str, Any]]] = []
         patched_files = dict(files)
         patch_messages: list[str] = []
-        if native_findings and nebius.configured:
+        if findings and nebius.configured:
             await update_job(
                 scan_id,
                 expected_worker_id=worker_id,
                 stage="remediating",
                 message="Requesting a constrained remediation proposal from Nemotron…",
             )
-            for finding in native_findings[:3]:
+            for finding in findings[:5]:
                 path = finding.get("path", "")
                 source = files.get(path, "")
                 if not source:
@@ -118,7 +118,7 @@ async def run_scan_job(
                         diagnostics=patch_messages,
                     )
                     if proposal:
-                        candidate_proposals.append(proposal)
+                        candidate_proposals.append((proposal, finding))
                 except NebiusUnavailable as exc:
                     patch_messages.append(f"{path}: Nebius unavailable: {exc}")
                     continue
@@ -127,10 +127,15 @@ async def run_scan_job(
                     continue
 
         if candidate_proposals:
-            for prop in candidate_proposals:
+            for prop, finding in candidate_proposals:
                 try:
                     patched_files = apply_exact_replacements(patched_files, [prop])
-                    proposals.append(prop)
+                    proposals.append({
+                        **prop,
+                        "scanner": str(finding.get("scanner") or "raksa"),
+                        "cwe": str(finding.get("cwe") or ""),
+                        "finding_id": str(finding.get("id") or ""),
+                    })
                 except ValueError as exc:
                     patch_messages.append(f"Patch rejected by context validation for {prop.get('path')}: {exc}")
 
@@ -148,7 +153,7 @@ async def run_scan_job(
             "eligible_for_pr": False,
         }
 
-        if changed_files:
+        if changed_files and not any(p.get("scanner") != "raksa" for p in proposals):
             await update_job(
                 scan_id,
                 expected_worker_id=worker_id,
@@ -164,6 +169,23 @@ async def run_scan_job(
                 patches=proposals,
             )
             verification = gate_result.as_dict()
+        elif changed_files:
+            # The existing differential verifier only covers Python SQL injection.
+            # Never use its SQLi-only checks to approve other scanner patches.
+            verification = {
+                "status": "unverified",
+                "sandbox_provider": settings.sandbox_provider,
+                "static_recheck_passed": False,
+                "security_exploit_passed": False,
+                "regression_tests_passed": False,
+                "tests": None,
+                "message": (
+                    "AI-generated OpenGrep patch proposal(s) require manual review. "
+                    "No category-specific differential security or regression verification ran. "
+                    "Draft PR creation is disabled."
+                ),
+                "eligible_for_pr": False,
+            }
         else:
             if not nebius.configured:
                 no_patch_msg = "No validated patch was prepared. Configure NEBIUS_API_KEY to enable model-assisted patch proposals."
