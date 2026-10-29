@@ -50,8 +50,13 @@ scanner error, not an assertion that the repository is safe.
   to the file selected by Raksa, never an arbitrary model path; an explicit
   conflicting or unsafe path is rejected. Python replacements are additionally
   syntax-parsed, and newly introduced standard-library module references must
-  have visible bindings/imports. These checks do **not** establish behavioral
-  equivalence, runtime correctness, or exploit mitigation.
+  have visible bindings/imports. If Nemotron explicitly returns both replacement
+  fields as empty strings, Raksa reports **AI abstained** rather than a malformed
+  patch and does not waste a retry; missing or partially populated fields still
+  get a corrective retry with field-presence diagnostics. This is especially
+  relevant when an authorized file root, command allowlist, or expression grammar
+  is not present in the repository snapshot. These checks do **not** establish
+  behavioral equivalence, runtime correctness, or exploit mitigation.
 - These proposals are **not verified** by the current SQLi-only gate. Any
   scan with an accepted OpenGrep patch is **unverified** and **ineligible for
   draft PR creation**, even when a SQLi patch is also present.
