@@ -19,6 +19,8 @@ type Finding = {
   description: string;
   confidence: number;
   status?: string;
+  scanner?: string;
+  rule_id?: string | null;
 };
 
 type Patch = { path: string; old_text: string; new_text: string; reason: string };
@@ -716,6 +718,7 @@ export default function App() {
                         <div>
                           <span className={`severity ${finding.severity}`}>{finding.severity.toUpperCase()}</span>
                           <span className="finding-cwe">{finding.cwe || 'APPSEC'}</span>
+                          <span className="finding-cwe">{finding.scanner === 'opengrep' ? 'OPENGREP · POTENTIAL' : 'RAKSA AST'}</span>
                         </div>
                         <h3>{finding.title}</h3>
                         <p>{finding.description}</p>
@@ -733,6 +736,13 @@ export default function App() {
                       <pre><code>{finding.evidence}</code></pre>
                     </div>
                   </article>
+                ))}
+
+                {Array.isArray(scan.verification?.scanner_runs) && scan.verification.scanner_runs.map((runner: { name: string; status: string; finding_count: number; message: string }) => (
+                  <div className="summary-box" key={runner.name}>
+                    <div className="summary-head"><strong>{runner.name.toUpperCase()} SCANNER</strong><small>{runner.status.toUpperCase()}</small></div>
+                    <p>{runner.message} · {runner.finding_count} potential finding(s)</p>
+                  </div>
                 ))}
 
                 {scan.summary && (
