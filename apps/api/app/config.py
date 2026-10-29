@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     github_app_slug: str = ""
     github_private_key_path: str = ""
     github_private_key: str = ""
+    github_webhook_secret: str = ""
     github_api_base_url: str = "https://api.github.com"
     github_api_version: str = "2022-11-28"
 

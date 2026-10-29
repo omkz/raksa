@@ -29,6 +29,42 @@ async def get_job(scan_id: str) -> dict[str, Any] | None:
         return job.as_dict() if job else None
 
 
+async def get_job_by_delivery_id(delivery_id: str) -> dict[str, Any] | None:
+    """Find existing scan job by GitHub webhook delivery ID for idempotency."""
+    if not delivery_id:
+        return None
+    async with async_session_scope() as session:
+        stmt = (
+            select(ScanJob)
+            .where(ScanJob.delivery_id == delivery_id)
+            .options(selectinload(ScanJob.findings))
+            .limit(1)
+        )
+        result = await session.execute(stmt)
+        job = result.scalar_one_or_none()
+        return job.as_dict() if job else None
+
+
+async def get_active_job_by_head_sha(full_name: str, head_sha: str) -> dict[str, Any] | None:
+    """Find existing scan job for a specific repo and PR head SHA."""
+    if not full_name or not head_sha:
+        return None
+    async with async_session_scope() as session:
+        stmt = (
+            select(ScanJob)
+            .where(
+                ScanJob.full_name == full_name,
+                ScanJob.head_sha == head_sha,
+            )
+            .options(selectinload(ScanJob.findings))
+            .order_by(ScanJob.created_at.desc())
+            .limit(1)
+        )
+        result = await session.execute(stmt)
+        job = result.scalar_one_or_none()
+        return job.as_dict() if job else None
+
+
 async def create_scan_job(
     scan_id: str,
     installation_id: str | None = None,
@@ -49,6 +85,12 @@ async def create_scan_job(
             workspace_id=workspace_id,
             installation_id=installation_id,
             full_name=full_name,
+            scan_type=attrs.get("scan_type", "repository"),
+            pr_number=attrs.get("pr_number"),
+            head_sha=attrs.get("head_sha"),
+            base_sha=attrs.get("base_sha"),
+            check_run_id=attrs.get("check_run_id"),
+            delivery_id=attrs.get("delivery_id"),
             status=attrs.get("status", "queued"),
             stage=attrs.get("stage", "queued"),
             message=attrs.get("message", "Scan queued."),
@@ -64,7 +106,13 @@ async def create_scan_job(
             scan_id=scan_id,
             event_type="scan.created",
             actor=actor,
-            details={"full_name": full_name, "installation_id": installation_id},
+            details={
+                "full_name": full_name,
+                "installation_id": installation_id,
+                "scan_type": attrs.get("scan_type", "repository"),
+                "pr_number": attrs.get("pr_number"),
+                "head_sha": attrs.get("head_sha"),
+            },
         )
         session.add(event)
         await session.flush()

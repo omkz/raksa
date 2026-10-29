@@ -10,7 +10,7 @@ from app.services.nebius import NebiusUnavailable, nebius
 from app.services.sandbox import sandbox
 from app.services.tavily import tavily
 from app.services.verifier import verify_remediation
-from app.state import JobOwnershipError, complete_job, fail_job, update_job
+from app.state import JobOwnershipError, complete_job, fail_job, get_job, update_job
 
 logger = logging.getLogger("raksa.workflow")
 
@@ -22,12 +22,23 @@ async def run_scan_job(
     *,
     worker_id: str | None = None,
 ) -> None:
+    job_info = await get_job(scan_id)
+    scan_type = str(job_info.get("scan_type", "repository")) if job_info else "repository"
+    head_sha = job_info.get("head_sha") if job_info else None
+    pr_number = job_info.get("pr_number") if job_info else None
+    check_run_id = job_info.get("check_run_id") if job_info else None
+
+    fetch_msg = (
+        f"Fetching repository snapshot for PR #{pr_number} ({head_sha[:7]})…"
+        if (scan_type == "pull_request" and head_sha and pr_number)
+        else "Fetching a bounded repository snapshot…"
+    )
     await update_job(
         scan_id,
         expected_worker_id=worker_id,
         status="running",
         stage="fetching",
-        message="Fetching a bounded repository snapshot…",
+        message=fetch_msg,
     )
     try:
         files, repo_meta, base_sha = await github_app.get_snapshot(
@@ -36,7 +47,17 @@ async def run_scan_job(
             max_files=settings.max_repository_files,
             max_file_bytes=settings.max_file_bytes,
             max_repository_bytes=settings.max_repository_bytes,
+            commit_sha=head_sha if (scan_type == "pull_request" and head_sha) else None,
         )
+        pr_changed_files: list[str] = []
+        if scan_type == "pull_request" and pr_number:
+            try:
+                pr_changed_files = await github_app.get_pull_request_files(
+                    installation_id, full_name, int(pr_number)
+                )
+            except Exception as exc:
+                logger.warning(f"Failed to fetch changed files for PR #{pr_number}: {exc}")
+
         await update_job(
             scan_id,
             expected_worker_id=worker_id,
@@ -192,10 +213,50 @@ async def run_scan_job(
             patch_messages=patch_messages,
             source_files=files,
         )
+
+        if check_run_id:
+            try:
+                conc, title, summary_md, detail_text = _format_check_run_output(
+                    findings=findings,
+                    files_count=len(files),
+                    verification=verification,
+                    pr_number=int(pr_number) if pr_number else None,
+                    head_sha=str(head_sha) if head_sha else None,
+                    pr_changed_files=pr_changed_files,
+                    summary_text=summary,
+                    patch_diff=patch_diff,
+                )
+                await github_app.update_check_run(
+                    installation_id,
+                    full_name,
+                    check_run_id=int(check_run_id),
+                    status="completed",
+                    conclusion=conc,
+                    title=title,
+                    summary=summary_md,
+                    text=detail_text,
+                )
+            except Exception as check_exc:
+                logger.warning(f"Failed to update GitHub Check Run {check_run_id}: {check_exc}")
     except JobOwnershipError:
         logger.warning(f"Scan job {scan_id} aborted: worker {worker_id} lost ownership lock.")
         raise
     except Exception as exc:
+        if check_run_id:
+            try:
+                is_unsupported = "No supported" in str(exc) or "too large" in str(exc)
+                await github_app.update_check_run(
+                    installation_id,
+                    full_name,
+                    check_run_id=int(check_run_id),
+                    status="completed",
+                    conclusion="neutral" if is_unsupported else "failure",
+                    title="Raksa Security Review: " + ("Unsupported Repository" if is_unsupported else "Review Failed"),
+                    summary=f"Security review could not be completed: {exc}",
+                )
+            except Exception as check_exc:
+                logger.warning(f"Failed to update GitHub Check Run {check_run_id} on error: {check_exc}")
+
         if worker_id is None:
             # Standalone call without a worker queue runner
             await fail_job(
@@ -228,6 +289,76 @@ def _tests_ran(result: dict[str, Any]) -> bool:
         return int(match.group(1)) > 0
     # pytest-style output also reports at least one collected/passed test.
     return bool(re.search(r"\b\d+\s+passed\b", combined, re.I))
+
+
+def _format_check_run_output(
+    findings: list[dict[str, Any]],
+    files_count: int,
+    verification: dict[str, Any],
+    pr_number: int | None,
+    head_sha: str | None,
+    pr_changed_files: list[str],
+    summary_text: str = "",
+    patch_diff: str = "",
+) -> tuple[str, str, str, str | None]:
+    """Return (conclusion, title, summary, text) for a GitHub Check Run."""
+    if findings:
+        conclusion = "failure"
+        count = len(findings)
+        title = f"Raksa Security Review: {count} Potential {'Vulnerability' if count == 1 else 'Vulnerabilities'} Detected"
+    else:
+        conclusion = "success"
+        title = "Raksa Security Review: No Vulnerabilities Detected"
+
+    lines = [
+        "### Raksa Security Review Summary",
+        f"- **Analyzed:** {files_count} source/test files",
+    ]
+    if pr_number:
+        lines.append(f"- **Pull Request:** #{pr_number}")
+    if head_sha:
+        lines.append(f"- **Commit:** `{head_sha[:7]}`")
+
+    if not findings:
+        lines.append("\n**Result:** No SQL injection or critical security vulnerabilities detected.")
+    else:
+        lines.append(f"\n#### Findings ({len(findings)})")
+        changed_set = set(pr_changed_files or [])
+        for i, f in enumerate(findings, 1):
+            sev = str(f.get("severity", "medium")).upper()
+            title_f = f.get("title", "Potential Vulnerability")
+            path = f.get("path", "unknown")
+            line = f.get("line", 1)
+            cwe = f.get("cwe") or "CWE-89"
+            in_diff = " *(modified in this PR)*" if path in changed_set else ""
+            evidence = f.get("evidence", "").strip()
+            lines.append(f"{i}. **[{sev}] {title_f}** (`{path}:{line}`){in_diff}")
+            lines.append(f"   - CWE: {cwe}")
+            if evidence:
+                lines.append(f"   - Evidence: `{evidence}`")
+
+    v_status = verification.get("status")
+    if v_status == "verified":
+        lines.append("\n#### Verification: Fix Verified in Sandbox")
+        lines.append("- Static AST Recheck: **Passed**")
+        lines.append("- Exploit Reproduction: **Passed** (reproduced on baseline, blocked on patch)")
+        reg_tests = verification.get("regression_tests") or {}
+        if reg_tests.get("passed"):
+            lines.append("- Characterization Regression Tests: **Passed**")
+    elif findings:
+        v_msg = verification.get("message") or "Verification not completed."
+        lines.append(f"\n#### Verification: {v_msg}")
+
+    summary_md = "\n".join(lines)
+
+    detail_parts = []
+    if summary_text:
+        detail_parts.append(f"### Remediation Analysis\n{summary_text}")
+    if patch_diff:
+        detail_parts.append(f"### Proposed Remediation Patch\n```diff\n{patch_diff}\n```")
+
+    detail_text = "\n\n".join(detail_parts) if detail_parts else None
+    return conclusion, title, summary_md, detail_text
 
 
 def public_job(job: dict[str, Any]) -> dict[str, Any]:

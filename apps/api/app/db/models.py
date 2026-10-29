@@ -3,6 +3,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     DateTime,
     Float,
     ForeignKey,
@@ -74,6 +75,11 @@ class ScanJob(Base):
     full_name: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     default_branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
     base_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    scan_type: Mapped[str] = mapped_column(String(32), nullable=False, default="repository")
+    pr_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    head_sha: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    check_run_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    delivery_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
 
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued", index=True)
     stage: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
@@ -158,6 +164,11 @@ class ScanJob(Base):
             "full_name": _val("full_name"),
             "default_branch": _val("default_branch"),
             "base_sha": _val("base_sha"),
+            "scan_type": _val("scan_type", "repository"),
+            "pr_number": _val("pr_number"),
+            "head_sha": _val("head_sha"),
+            "check_run_id": _val("check_run_id"),
+            "delivery_id": _val("delivery_id"),
             "findings": findings_data,
             "patches": list(_val("patches") or []),
             "diff": _val("diff"),

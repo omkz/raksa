@@ -1,5 +1,8 @@
 import base64
+import hashlib
+import hmac
 import time
+from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import quote
@@ -123,16 +126,26 @@ class GitHubAppService:
         return await self._installation_request(installation_id, "GET", f"/repos/{owner}/{repo}")
 
     async def get_snapshot(
-        self, installation_id: str, full_name: str, *, max_files: int, max_file_bytes: int,
+        self,
+        installation_id: str,
+        full_name: str,
+        *,
+        max_files: int,
+        max_file_bytes: int,
         max_repository_bytes: int,
+        commit_sha: str | None = None,
     ) -> tuple[dict[str, str], dict[str, Any], str]:
-        """Fetch a bounded text-only source snapshot from a repository's default branch."""
+        """Fetch a bounded text-only source snapshot from a repository at commit_sha or default branch."""
         meta = await self.get_repository(installation_id, full_name)
-        branch = str(meta.get("default_branch", "main"))
-        ref = await self._installation_request(
-            installation_id, "GET", f"/repos/{full_name}/git/ref/heads/{quote(branch, safe='/')}",
-        )
-        base_sha = str(ref["object"]["sha"])
+        if commit_sha:
+            base_sha = str(commit_sha)
+        else:
+            branch = str(meta.get("default_branch", "main"))
+            ref = await self._installation_request(
+                installation_id, "GET", f"/repos/{full_name}/git/ref/heads/{quote(branch, safe='/')}",
+            )
+            base_sha = str(ref["object"]["sha"])
+
         commit = await self._installation_request(
             installation_id, "GET", f"/repos/{full_name}/git/commits/{base_sha}",
         )
@@ -245,6 +258,101 @@ class GitHubAppService:
         )
         return {"number": pr.get("number"), "html_url": pr.get("html_url"), "branch": branch_name}
 
+    async def get_pull_request_files(
+        self,
+        installation_id: str,
+        full_name: str,
+        pr_number: int,
+    ) -> list[str]:
+        """Fetch list of changed file paths in a pull request."""
+        self._validate_full_name(full_name)
+        owner, repo = full_name.split("/", 1)
+        files_data = await self._installation_request(
+            installation_id, "GET", f"/repos/{owner}/{repo}/pulls/{pr_number}/files",
+            params={"per_page": 100},
+        )
+        if not isinstance(files_data, list):
+            return []
+        return [str(item.get("filename")) for item in files_data if item.get("filename")]
+
+    async def create_check_run(
+        self,
+        installation_id: str,
+        full_name: str,
+        *,
+        head_sha: str,
+        name: str = "Raksa Security Review",
+        status: str = "in_progress",
+        title: str = "Raksa Security Review in progress",
+        summary: str = "Analyzing pull request for potential vulnerabilities…",
+    ) -> dict[str, Any]:
+        """Create a GitHub Check Run for the specified PR commit."""
+        self._validate_full_name(full_name)
+        owner, repo = full_name.split("/", 1)
+        payload: dict[str, Any] = {
+            "name": name,
+            "head_sha": head_sha,
+            "status": status,
+            "started_at": datetime.now(UTC).isoformat(),
+            "output": {
+                "title": title,
+                "summary": summary,
+            },
+        }
+        try:
+            data = await self._installation_request(
+                installation_id, "POST", f"/repos/{owner}/{repo}/check-runs", json=payload,
+            )
+            return dict(data)
+        except GitHubAppError as exc:
+            if "403" in str(exc):
+                raise GitHubAppError(
+                    f"GitHub App lacks 'Checks: Read and write' permission for {full_name}. "
+                    "Please enable Checks (Read and write) in GitHub App settings."
+                ) from exc
+            raise
+
+    async def update_check_run(
+        self,
+        installation_id: str,
+        full_name: str,
+        *,
+        check_run_id: int,
+        status: str = "completed",
+        conclusion: str = "success",
+        title: str,
+        summary: str,
+        text: str | None = None,
+    ) -> dict[str, Any]:
+        """Update an existing GitHub Check Run with status, conclusion, and output."""
+        self._validate_full_name(full_name)
+        owner, repo = full_name.split("/", 1)
+        output: dict[str, Any] = {
+            "title": title,
+            "summary": summary,
+        }
+        if text:
+            output["text"] = text
+        payload: dict[str, Any] = {
+            "name": "Raksa Security Review",
+            "status": status,
+            "conclusion": conclusion,
+            "completed_at": datetime.now(UTC).isoformat(),
+            "output": output,
+        }
+        try:
+            data = await self._installation_request(
+                installation_id, "PATCH", f"/repos/{owner}/{repo}/check-runs/{check_run_id}", json=payload,
+            )
+            return dict(data)
+        except GitHubAppError as exc:
+            if "403" in str(exc):
+                raise GitHubAppError(
+                    f"GitHub App lacks 'Checks: Read and write' permission for {full_name}. "
+                    "Please enable Checks (Read and write) in GitHub App settings."
+                ) from exc
+            raise
+
     @staticmethod
     def _validate_full_name(full_name: str) -> None:
         parts = full_name.split("/")
@@ -257,6 +365,20 @@ class GitHubAppService:
 def is_safe_repo_path(path: str) -> bool:
     pure = PurePosixPath(path)
     return bool(path) and not pure.is_absolute() and ".." not in pure.parts and "\\" not in path and "\x00" not in path
+
+
+def verify_webhook_signature(payload_bytes: bytes, signature_header: str | None, secret: str) -> bool:
+    """Verify GitHub X-Hub-Signature-256 HMAC-SHA256 signature."""
+    if not secret:
+        return True
+    if not signature_header:
+        return False
+    parts = signature_header.strip().split("=", 1)
+    if len(parts) != 2 or parts[0].lower() != "sha256":
+        return False
+    mac = hmac.new(secret.encode("utf-8"), payload_bytes, hashlib.sha256)
+    expected = mac.hexdigest()
+    return hmac.compare_digest(parts[1].lower(), expected.lower())
 
 
 github_app = GitHubAppService()
