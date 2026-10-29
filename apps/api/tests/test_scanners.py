@@ -56,3 +56,77 @@ async def test_adapter_maps_mock_output(monkeypatch: pytest.MonkeyPatch) -> None
     result = await OpenGrepScanner().scan({"app.js": "eval(input);\n"}, max_findings=10)
     assert result.status == "completed"
     assert result.findings[0].title == "Dynamic execution"
+
+
+def test_clean_pr_check_is_success_when_scanner_disabled() -> None:
+    from app.services.workflow import _format_check_run_output
+
+    conclusion, title, summary, _ = _format_check_run_output(
+        findings=[],
+        files_count=1,
+        verification={"status": "unverified"},
+        pr_number=42,
+        head_sha="a" * 40,
+        pr_changed_files=[],
+        scanner_reports=[{
+            "name": "opengrep", "status": "skipped",
+            "finding_count": 0, "message": "OpenGrep disabled.",
+        }],
+    )
+    assert conclusion == "success"
+    assert "No Vulnerabilities Detected" in title
+    assert "#### Findings (0)" not in summary
+    assert "opengrep" in summary
+
+
+def test_incomplete_scanner_coverage_is_neutral_not_success() -> None:
+    from app.services.workflow import _format_check_run_output
+
+    conclusion, title, summary, _ = _format_check_run_output(
+        findings=[],
+        files_count=1,
+        verification={"status": "unverified"},
+        pr_number=42,
+        head_sha="a" * 40,
+        pr_changed_files=[],
+        scanner_reports=[{
+            "name": "opengrep", "status": "unavailable",
+            "finding_count": 0, "message": "Docker CLI not available.",
+        }],
+    )
+    assert conclusion == "neutral"
+    assert "Scanner Coverage Incomplete" in title
+    assert "#### Findings (0)" not in summary
+    assert "**opengrep**: unavailable" in summary
+
+
+def test_check_run_renders_static_finding_and_its_scanner() -> None:
+    from app.services.workflow import _format_check_run_output
+
+    finding = {
+        "title": "Dynamic execution",
+        "severity": "medium",
+        "cwe": "CWE-94",
+        "scanner": "opengrep",
+        "path": "app.js",
+        "line": 1,
+        "evidence": "eval(input)",
+    }
+    conclusion, title, summary, _ = _format_check_run_output(
+        findings=[finding],
+        files_count=1,
+        verification={"status": "unverified", "message": "No fix verified."},
+        pr_number=42,
+        head_sha="a" * 40,
+        pr_changed_files=["app.js"],
+        scanner_reports=[{
+            "name": "opengrep", "status": "completed",
+            "finding_count": 1, "message": "Rule scan completed.",
+        }],
+    )
+    assert conclusion == "failure"
+    assert "Potential Vulnerability Detected" in title
+    assert "#### Findings (1)" in summary
+    assert "CWE-94; scanner: opengrep" in summary
+    assert "Dynamic execution" in summary
+    assert "No SQL injection or critical security vulnerabilities detected" not in summary

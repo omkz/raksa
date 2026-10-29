@@ -334,8 +334,6 @@ def _format_check_run_output(
 
     if not findings:
         lines.append("\n**Result:** No SQL injection or critical security vulnerabilities detected. Scanner coverage is limited; this is not a complete audit.")
-    for scanner in scanner_reports or []:
-        lines.append(f"- **{scanner['name']}**: {scanner['status']} ({scanner['finding_count']} finding(s)). {scanner['message']}")
     else:
         lines.append(f"\n#### Findings ({len(findings)})")
         changed_set = set(pr_changed_files or [])
@@ -351,6 +349,9 @@ def _format_check_run_output(
             lines.append(f"   - CWE: {cwe}; scanner: {f.get('scanner', 'raksa')}")
             if evidence:
                 lines.append(f"   - Evidence: `{evidence}`")
+
+    for scanner in scanner_reports or []:
+        lines.append(f"- **{scanner['name']}**: {scanner['status']} ({scanner['finding_count']} finding(s)). {scanner['message']}")
 
     v_status = verification.get("status")
     if v_status == "verified":
