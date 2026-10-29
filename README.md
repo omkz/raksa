@@ -8,7 +8,7 @@ Raksa is an open-source, AI-assisted application security engineer for developer
 
 **Investigate → Remediate → Verify → Review.** Raksa focuses on actionable fixes backed by the checks that actually ran—not more alert noise.
 
-> **Current scope:** Python SQL injection (CWE-89) detection and remediation. Findings are potential issues until tested. Verified results are specific to the executed checks, not a guarantee that the repository is fully secure. Human review remains required.
+> **Current scope:** Python SQL injection (CWE-89) detection and specialist remediation/verification, plus optional OpenGrep static findings for shell execution (CWE-78), dynamic eval (CWE-94), DOM XSS sinks (CWE-79), and direct request file access (CWE-22). Nemotron can propose exact-context fixes for OpenGrep findings, but those proposals remain **unverified and ineligible for automated PR creation**. Findings are potential issues until tested; human review remains required.
 
 [Explore the demo repository](https://github.com/omkz/raksa-vulnerable-demo/pulls) · [Get started locally](#run-locally)
 
@@ -37,6 +37,7 @@ Raksa does not push directly to the default branch.
 - GitHub App installation flow and repository selection
 - Bounded repository snapshots for analysis
 - Heuristic detection of potential Python SQL injection
+- Optional OpenGrep detection of CWE-78/94/79/22 sink patterns, with unverified Nemotron patch proposals
 - Nemotron-assisted finding summaries and remediation proposals
 - Exact-context patch validation
 - Static rechecks and sandbox-based verification
