@@ -351,3 +351,45 @@ async def test_abstention_after_malformed_attempt_is_reported_as_such() -> None:
     assert len(diagnostics) == 1
     assert "AI abstained after retry" in diagnostics[0]
     assert "command allowlist is unknown" in diagnostics[0]
+
+
+
+@pytest.mark.asyncio
+async def test_empty_json_retry_uses_explicit_schema_without_echoing_empty_object() -> None:
+    """A bare {} is malformed, not evidence that a safe fix was declined."""
+    service = NebiusService()
+    mock_client = MagicMock()
+    source = (
+        "from flask import request\n"
+        "def read_file():\n"
+        '    return open(request.args.get("filename"), encoding="utf-8").read()\n'
+    )
+    decline = {
+        "path": "src/unsafe_path.py",
+        "old_text": "",
+        "new_text": "",
+        "reason": "No permitted root directory is specified for user filenames.",
+    }
+    mock_client.chat.completions.create = AsyncMock(
+        side_effect=[
+            MagicMock(choices=[MagicMock(message=MagicMock(content="{}"))]),
+            MagicMock(choices=[MagicMock(message=MagicMock(content=json.dumps(decline)))]),
+        ]
+    )
+    service._client = MagicMock(return_value=mock_client)
+    diagnostics: list[str] = []
+
+    proposal = await service.propose_patch(
+        path="src/unsafe_path.py", source=source,
+        finding={"scanner": "opengrep", "cwe": "CWE-22", "line": 3},
+        diagnostics=diagnostics,
+    )
+    assert proposal is None
+    assert mock_client.chat.completions.create.await_count == 2
+    retry_messages = mock_client.chat.completions.create.await_args.kwargs["messages"]
+    assert [message["role"] for message in retry_messages] == [
+        "system", "user", "user"
+    ]
+    assert "EXACTLY four fields" in retry_messages[-1]["content"]
+    assert "Never return an empty JSON object" in retry_messages[-1]["content"]
+    assert "AI abstained after retry" in diagnostics[0]
