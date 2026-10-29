@@ -255,3 +255,99 @@ async def test_explicitly_wrong_model_path_is_not_overwritten() -> None:
     assert len(diagnostics) == 1
     assert "Wrong path" in diagnostics[0]
     assert "src/other.py" in diagnostics[0]
+
+
+
+@pytest.mark.asyncio
+async def test_explicit_model_abstention_is_not_retried_as_invalid_json() -> None:
+    """A deliberate no-patch response is safe and should not waste a retry."""
+    service = NebiusService()
+    mock_client = MagicMock()
+    source = "def read_file(name):\n    return open(name).read()\n"
+    abstention = {
+        "path": "src/unsafe_path.py",
+        "old_text": "",
+        "new_text": "",
+        "reason": "No authorized filesystem root is specified by the application.",
+    }
+    mock_client.chat.completions.create = AsyncMock(
+        return_value=MagicMock(
+            choices=[MagicMock(message=MagicMock(content=json.dumps(abstention)))]
+        )
+    )
+    service._client = MagicMock(return_value=mock_client)
+    diagnostics: list[str] = []
+    proposal = await service.propose_patch(
+        path="src/unsafe_path.py", source=source,
+        finding={"scanner": "opengrep", "cwe": "CWE-22", "line": 2},
+        diagnostics=diagnostics,
+    )
+    assert proposal is None
+    mock_client.chat.completions.create.assert_awaited_once()
+    assert len(diagnostics) == 1
+    assert "AI abstained" in diagnostics[0]
+    assert "No patch was applied or verified" in diagnostics[0]
+    assert "authorized filesystem root" in diagnostics[0]
+
+
+@pytest.mark.asyncio
+async def test_missing_model_old_text_is_not_confused_with_abstention() -> None:
+    """Malformed output retains corrective retry and explains which field is absent."""
+    service = NebiusService()
+    mock_client = MagicMock()
+    source = "def run(value):\n    return value\n"
+    malformed = {
+        "path": "src/unsafe_shell.py",
+        "new_text": "return safe_value",
+        "reason": "Model accidentally omitted old_text",
+    }
+    mock_client.chat.completions.create = AsyncMock(
+        return_value=MagicMock(
+            choices=[MagicMock(message=MagicMock(content=json.dumps(malformed)))]
+        )
+    )
+    service._client = MagicMock(return_value=mock_client)
+    diagnostics: list[str] = []
+    proposal = await service.propose_patch(
+        path="src/unsafe_shell.py", source=source,
+        finding={"scanner": "opengrep", "cwe": "CWE-78", "line": 2},
+        diagnostics=diagnostics,
+    )
+    assert proposal is None
+    assert mock_client.chat.completions.create.await_count == 2
+    assert len(diagnostics) == 1
+    assert "Proposal rejected after retry" in diagnostics[0]
+    assert "old_text=missing" in diagnostics[0]
+    assert "new_text=present" in diagnostics[0]
+    assert "AI abstained" not in diagnostics[0]
+
+
+@pytest.mark.asyncio
+async def test_abstention_after_malformed_attempt_is_reported_as_such() -> None:
+    service = NebiusService()
+    mock_client = MagicMock()
+    source = "def run(value):\n    return value\n"
+    first = {"path": "src/unsafe_shell.py", "new_text": "return something"}
+    second = {
+        "old_text": "",
+        "new_text": "",
+        "reason": "The command allowlist is unknown; cannot safely preserve behavior.",
+    }
+    mock_client.chat.completions.create = AsyncMock(
+        side_effect=[
+            MagicMock(choices=[MagicMock(message=MagicMock(content=json.dumps(first)))]),
+            MagicMock(choices=[MagicMock(message=MagicMock(content=json.dumps(second)))]),
+        ]
+    )
+    service._client = MagicMock(return_value=mock_client)
+    diagnostics: list[str] = []
+    proposal = await service.propose_patch(
+        path="src/unsafe_shell.py", source=source,
+        finding={"scanner": "opengrep", "cwe": "CWE-78", "line": 2},
+        diagnostics=diagnostics,
+    )
+    assert proposal is None
+    assert mock_client.chat.completions.create.await_count == 2
+    assert len(diagnostics) == 1
+    assert "AI abstained after retry" in diagnostics[0]
+    assert "command allowlist is unknown" in diagnostics[0]
