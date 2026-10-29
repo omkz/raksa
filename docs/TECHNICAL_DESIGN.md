@@ -6,7 +6,7 @@
 - Model: NVIDIA Nemotron through Nebius Token Factory's OpenAI-compatible API
 - Research: Tavily Search API
 - Repository operations: GitHub App installation tokens + GitHub REST API
-- Execution: Nebius Token Factory Sandbox (preferred for the hackathon); optional local Docker runner; deterministic SQLite proof harness for the demo
+- Execution: Nebius Token Factory Sandbox (when available); optional local Docker runner; deterministic SQLite proof harness for the demo
 
 ## Workflow
 1. Connect/install the GitHub App and select a repository.

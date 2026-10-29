@@ -245,7 +245,7 @@ export default function App() {
 
   if (checkingAuth) {
     return (
-      <div className="login-shell">
+      <div className="login-shell login-shell-loading">
         <div className="login-loading">
           <span className="spinner" />
           <span>Connecting to workspace…</span>
@@ -257,6 +257,23 @@ export default function App() {
   if (!auth) {
     return (
       <div className="login-shell">
+        <section className="login-showcase" aria-labelledby="welcome-heading">
+          <div className="login-showcase-kicker"><span aria-hidden="true" /> YOUR AI SECURITY ENGINEER</div>
+          <h1 id="welcome-heading" className="login-marketing-title">Security fixes.<br /><em>Proven.</em></h1>
+          <p className="login-marketing-copy">
+            Meet Raksa, your AI security engineer. Investigate potential vulnerabilities, prepare focused code fixes, and review the evidence before opening a pull request.
+          </p>
+          <div className="login-proof-flow" aria-label="How Raksa works">
+            <div className="login-proof-step"><span>01</span><strong>Investigate</strong><small>Surface potential code vulnerabilities</small></div>
+            <div className="login-proof-step"><span>02</span><strong>Remediate</strong><small>Propose focused, reviewable patches</small></div>
+            <div className="login-proof-step"><span>03</span><strong>Verify</strong><small>Check the fix with available test evidence</small></div>
+            <div className="login-proof-step"><span>04</span><strong>Review</strong><small>Keep the final decision with developers</small></div>
+          </div>
+          <p className="login-showcase-footnote">Starting with Python SQL injection · Built for developer review</p>
+          <a className="login-repo-link" href="https://github.com/omkz/raksa" target="_blank" rel="noreferrer">
+            Explore the open-source project <span aria-hidden="true">↗</span>
+          </a>
+        </section>
         <div className="login-card">
           <div className="login-brand">
             <div className="brand-mark">
@@ -265,13 +282,13 @@ export default function App() {
             </div>
             <div>
               <div className="brand-name">raksa<span>.</span></div>
-              <div className="brand-caption">AUTONOMOUS APPSEC</div>
+              <div className="brand-caption">AI SECURITY ENGINEER</div>
             </div>
           </div>
 
-          <h1 className="login-title">Sign in to Raksa</h1>
+          <h2 className="login-title">Continue to Raksa</h2>
           <p className="login-subtitle">
-            Autonomous application security workflow for detecting, reproducing, and verifying SQL injection remediations.
+            Sign in with GitHub to access your security workspace. You choose which repositories Raksa can inspect.
           </p>
 
           {authError && (
@@ -306,15 +323,15 @@ export default function App() {
           <div className="login-features">
             <div className="login-feature-row">
               <span className="check" aria-hidden="true">✓</span>
-              <span>Zero-config AST analysis for Python SQL injection (CWE-89)</span>
+              <span>Identify potential Python SQL injection issues (CWE-89)</span>
             </div>
             <div className="login-feature-row">
               <span className="check" aria-hidden="true">✓</span>
-              <span>Exact-context parameterized fix synthesis with Nemotron</span>
+              <span>Generate focused, exact-context patches with Nemotron</span>
             </div>
             <div className="login-feature-row">
               <span className="check" aria-hidden="true">✓</span>
-              <span>Deterministic sandbox test verification before draft PRs</span>
+              <span>Review test evidence before approving a draft PR</span>
             </div>
           </div>
 
@@ -336,7 +353,7 @@ export default function App() {
           </div>
           <div>
             <div className="brand-name">raksa<span>.</span></div>
-            <div className="brand-caption">AUTONOMOUS APPSEC</div>
+            <div className="brand-caption">AI SECURITY ENGINEER</div>
           </div>
         </div>
 
@@ -423,11 +440,11 @@ export default function App() {
         <section className="hero-row">
           <div className="hero-content">
             <div className="eyebrow">
-              <span aria-hidden="true" /> APPLICATION SECURITY WORKFLOW
+              <span aria-hidden="true" /> AI-ASSISTED SECURITY ENGINEERING
             </div>
-            <h1>Find the flaw.<br /><em>Verify the fix.</em></h1>
+            <h1>Security fixes.<br /><em>Proven.</em></h1>
             <p className="hero-copy">
-              Raksa analyzes Python repositories for SQL injection vulnerabilities (CWE-89), synthesizes exact-context parameterized remediations with Nemotron, and proves the fix in an isolated test sandbox before human review.
+              Meet your AI security engineer. Raksa investigates potential SQL injection in Python code, proposes focused fixes with NVIDIA Nemotron, and shows verification evidence when an isolated sandbox is configured. Developers review every change before a draft PR is created.
             </p>
           </div>
           <div className="hero-art" aria-hidden="true">
@@ -446,16 +463,16 @@ export default function App() {
           <div className="workflow-step">
             <div className="step-badge">01</div>
             <div className="step-body">
-              <strong className="step-title">Find</strong>
-              <p className="step-desc">Static AST heuristics identify unparameterized SQL queries.</p>
+              <strong className="step-title">Investigate</strong>
+              <p className="step-desc">Static analysis flags potentially unsafe SQL queries.</p>
             </div>
           </div>
           <div className="workflow-divider" aria-hidden="true">→</div>
           <div className="workflow-step">
             <div className="step-badge">02</div>
             <div className="step-body">
-              <strong className="step-title">Fix</strong>
-              <p className="step-desc">Nemotron crafts minimal, exact-context parameterized driver fixes.</p>
+              <strong className="step-title">Remediate</strong>
+              <p className="step-desc">Nemotron proposes targeted patches for developer review.</p>
             </div>
           </div>
           <div className="workflow-divider" aria-hidden="true">→</div>
@@ -463,7 +480,7 @@ export default function App() {
             <div className="step-badge">03</div>
             <div className="step-body">
               <strong className="step-title">Verify</strong>
-              <p className="step-desc">Isolated sandbox runs differential exploit and regression tests.</p>
+              <p className="step-desc">Configured sandboxes run security and regression checks.</p>
             </div>
           </div>
           <div className="workflow-divider" aria-hidden="true">→</div>
@@ -471,7 +488,7 @@ export default function App() {
             <div className="step-badge">04</div>
             <div className="step-body">
               <strong className="step-title">Review</strong>
-              <p className="step-desc">Human verifies test evidence before approving a draft PR.</p>
+              <p className="step-desc">Developers inspect the diff and evidence before PR creation.</p>
             </div>
           </div>
         </div>
@@ -920,8 +937,8 @@ export default function App() {
 
         <footer className="footer">
           <span>RAKSA © 2026</span>
-          <span>PROVE WITH EVIDENCE <b>•</b> REVIEW BEFORE MERGE</span>
-          <span>AUTONOMOUS APPLICATION SECURITY</span>
+          <span>SECURITY FIXES. PROVEN. <b>•</b> REVIEW BEFORE MERGE</span>
+          <span>YOUR AI SECURITY ENGINEER</span>
         </footer>
       </main>
     </div>
