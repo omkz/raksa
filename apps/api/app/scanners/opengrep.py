@@ -126,7 +126,9 @@ class OpenGrepScanner:
                 "--network", "none", "--memory", "768m", "--cpus", "1",
                 "--pids-limit", "128", "--cap-drop", "ALL",
                 "--security-opt", "no-new-privileges:true",
-                "--read-only", "--tmpfs", "/tmp:rw,nosuid,size=64m",
+                # The trusted OpenGrep binary unpacks and execs its child from /tmp.
+                # Keep the sandbox isolated; exec is needed because Docker defaults to noexec.
+                "--read-only", "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=512m,mode=1777",
                 "--user", f"{os.getuid()}:{os.getgid()}",
                 "-e", "HOME=/tmp", "-e", "XDG_CACHE_HOME=/tmp",
                 "-v", f"{workspace}:/workspace:ro",

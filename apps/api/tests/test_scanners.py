@@ -1,3 +1,5 @@
+import subprocess
+
 import pytest
 
 from app.config import settings
@@ -130,3 +132,29 @@ def test_check_run_renders_static_finding_and_its_scanner() -> None:
     assert "CWE-94; scanner: opengrep" in summary
     assert "Dynamic execution" in summary
     assert "No SQL injection or critical security vulnerabilities detected" not in summary
+
+
+def test_docker_runner_has_enough_tmpfs_space_without_relaxing_isolation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Self-extracting OpenGrep needs more than 64 MiB in /tmp; keep sandbox limits."""
+    executed: list[list[str]] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        executed.append(command)
+        return subprocess.CompletedProcess(
+            command, 0, stdout='{"results": [], "errors": []}', stderr=""
+        )
+
+    monkeypatch.setattr("app.scanners.opengrep.subprocess.run", fake_run)
+    result = OpenGrepScanner._run_docker({"src/app.py": "import os\nos.system(command)\n"})
+
+    assert result == {"results": [], "errors": []}
+    cmd = executed[0]
+    assert cmd[cmd.index("--tmpfs") + 1] == "/tmp:rw,exec,nosuid,nodev,size=512m,mode=1777"
+    assert cmd[cmd.index("--network") + 1] == "none"
+    assert "--read-only" in cmd
+    assert cmd[cmd.index("--pull") + 1] == "never"
+    assert cmd[cmd.index("--user") + 1]
+    assert cmd[cmd.index("--cap-drop") + 1] == "ALL"
+    assert cmd[cmd.index("--memory") + 1] == "768m"

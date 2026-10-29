@@ -23,6 +23,18 @@ limits for CPU, memory, processes, and runtime. For production, use a dedicated
 scanner worker with restricted Docker daemon access, pin the resulting image
 digest, and independently review image/dependency provenance.
 
+The scanner image unpacks its executable and launches a child process inside
+container `/tmp` at startup. Raksa provides a **512 MiB tmpfs** with explicit
+`exec,nosuid,nodev` options. The previous 64 MiB limit caused
+`No space left on device`; the default `noexec` behavior then caused
+`couldn't launch child (exec): Permission denied`. Enabling `exec` permits
+execution from this temporary mount; all analyzed repository content remains
+read-only and the container has no network access. The tmpfs is memory-backed
+and remains subject to the container's **768 MiB memory cap**.
+If a scan still fails due to resource pressure, inspect the worker's Docker
+stderr and available memory; do not disable network isolation or other sandbox
+restrictions to work around it.
+
 OpenGrep is opt-in; no hidden rule registry or internet download is performed
 at scanning time. Missing Docker/image or malformed output yields an explicit
 scanner error, not an assertion that the repository is safe.
