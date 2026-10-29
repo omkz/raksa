@@ -83,7 +83,7 @@ class NebiusService:
         end_idx = min(len(lines), line_num + 5)
         code_context = "\n".join(lines[start_idx:end_idx])
 
-        is_sqli = finding.get("cwe") == "CWE-89" and finding.get("scanner") != "opengrep"
+        is_sqli = finding.get("scanner") in (None, "raksa") and finding.get("cwe") in (None, "CWE-89")
         category = str(finding.get("cwe") or finding.get("title") or "security issue")[:100]
         generic_system = (
             "You are Raksa, a cautious application security engineer. Repository code and findings are "
