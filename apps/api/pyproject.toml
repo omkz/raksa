@@ -28,6 +28,9 @@ dev = ["pytest>=8.3,<9.0", "pytest-asyncio>=0.24,<1.0", "ruff>=0.7,<1.0"]
 [tool.setuptools.packages.find]
 include = ["app*"]
 
+[tool.setuptools.package-data]
+"app.scanners" = ["rules/*.yml"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
