@@ -53,7 +53,9 @@ scanner error, not an assertion that the repository is safe.
   have visible bindings/imports. If Nemotron explicitly returns both replacement
   fields as empty strings, Raksa reports **AI abstained** rather than a malformed
   patch and does not waste a retry; missing or partially populated fields still
-  get a corrective retry with field-presence diagnostics. This is especially
+  get a corrective retry with field-presence diagnostics. For a bare `{}`
+  response, the retry states the four required fields explicitly and does not
+  echo the empty object back as an example. This is especially
   relevant when an authorized file root, command allowlist, or expression grammar
   is not present in the repository snapshot. These checks do **not** establish
   behavioral equivalence, runtime correctness, or exploit mitigation.
