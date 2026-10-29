@@ -127,3 +127,66 @@ async def test_mixed_sql_and_opengrep_ai_patches_cannot_pass_sqli_gate(
     assert job["verification"]["eligible_for_pr"] is False
     assert "manual review" in job["verification"]["message"]
     gate.assert_not_awaited()
+
+
+def test_patch_api_schema_preserves_scanner_provenance() -> None:
+    from app.schemas import PatchProposal
+
+    data = PatchProposal.model_validate({
+        "path": "view.js",
+        "old_text": "node.innerHTML = value",
+        "new_text": "node.textContent = value",
+        "reason": "DOM XSS proposal",
+        "scanner": "opengrep",
+        "cwe": "CWE-79",
+        "finding_id": "xss-1",
+    }).model_dump()
+    assert data["scanner"] == "opengrep"
+    assert data["cwe"] == "CWE-79"
+    assert data["finding_id"] == "xss-1"
+
+
+@pytest.mark.asyncio
+async def test_opengrep_only_finding_produces_unverified_patch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files = {"view.js": "function render(node, value) {\n  node.innerHTML = value;\n}\n"}
+    finding = SecurityFinding(
+        id="xss-only", title="Potential XSS", severity="medium", path="view.js",
+        line=2, evidence="node.innerHTML = value", description="DOM HTML sink",
+        confidence=0.65, scanner="opengrep", rule_id="raksa.javascript-html-injection",
+        cwe="CWE-79",
+    )
+    fake_nebius = MagicMock()
+    fake_nebius.configured = True
+    fake_nebius.summarize_findings = AsyncMock(return_value="Potential XSS.")
+    fake_nebius.propose_patch = AsyncMock(return_value={
+        "path": "view.js", "old_text": "node.innerHTML = value",
+        "new_text": "node.textContent = value", "reason": "Text API",
+    })
+    monkeypatch.setattr("app.services.workflow.nebius", fake_nebius)
+    monkeypatch.setattr(
+        "app.services.workflow.github_app.get_snapshot",
+        AsyncMock(return_value=(files, {"default_branch": "main"}, "base123")),
+    )
+    monkeypatch.setattr(
+        "app.services.workflow.scan_snapshot",
+        AsyncMock(return_value=[ScannerResult("opengrep", "completed", [finding])]),
+    )
+    gate = AsyncMock(side_effect=AssertionError("Specialist gate cannot verify XSS"))
+    monkeypatch.setattr("app.services.workflow.verify_remediation", gate)
+
+    scan_id = "test-opengrep-only-ai-proposal"
+    await put_job(scan_id, {
+        "id": scan_id, "status": "queued", "stage": "queued", "message": "Scan queued.",
+        "full_name": "owner/repo", "installation_id": "123",
+    })
+    await run_scan_job(scan_id, "123", "owner/repo")
+    job = await get_job(scan_id)
+    assert job is not None and job["status"] == "completed"
+    assert len(job["findings"]) == 1
+    assert len(job["patches"]) == 1
+    assert job["patches"][0]["scanner"] == "opengrep"
+    assert job["verification"]["eligible_for_pr"] is False
+    assert job["verification"]["status"] == "unverified"
+    gate.assert_not_awaited()
