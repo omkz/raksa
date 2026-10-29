@@ -6,6 +6,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import settings
 from app.db.session import check_db_health, close_db, init_db
+from app.routers.auth import router as auth_router
 from app.routers.github import router as github_router
 from app.routers.scans import router as scans_router
 from app.schemas import HealthResponse
@@ -41,8 +42,9 @@ app.add_middleware(
     allow_origins=settings.allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type"],
+    allow_headers=["Content-Type", "Accept", "Authorization", "X-Requested-With"],
 )
+app.include_router(auth_router)
 app.include_router(github_router)
 app.include_router(scans_router)
 

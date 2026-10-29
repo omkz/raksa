@@ -8,8 +8,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.config import settings
-from app.db.models import ScanJob, Workspace
+from app.db.models import ScanJob, User, Workspace
 from app.db.session import async_session_scope
+from app.dependencies import AuthenticatedUser, get_current_user
 from app.main import app
 from app.services.job_store import (
     JobOwnershipError,
@@ -248,15 +249,25 @@ async def test_audit_events_recorded_and_queried_via_api() -> None:
         details={"note": "Manual review started"},
     )
 
-    with TestClient(app) as client:
-        response = client.get(f"/api/scans/{scan_id}/events")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["scan_id"] == scan_id
-        events = data["events"]
-        assert len(events) >= 1
-        event_types = [e["event_type"] for e in events]
-        assert "scan.custom_action" in event_types
+    auth_user = AuthenticatedUser(
+        user={"id": "test_analyst_id", "login": "security_analyst"},
+        workspace={"id": "default", "name": "Default Workspace"},
+        session={"id": "sess_audit"},
+        role="owner",
+    )
+    app.dependency_overrides[get_current_user] = lambda: auth_user
+    try:
+        with TestClient(app) as client:
+            response = client.get(f"/api/scans/{scan_id}/events")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["scan_id"] == scan_id
+            events = data["events"]
+            assert len(events) >= 1
+            event_types = [e["event_type"] for e in events]
+            assert "scan.custom_action" in event_types
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
 
 
 @pytest.mark.asyncio
@@ -295,9 +306,12 @@ async def test_scan_worker_run_once_catches_retryable_error(monkeypatch: pytest.
 async def test_workspace_association_and_persistence() -> None:
     ws_id = gen_id("ws")
     async with async_session_scope() as session:
+        user = User(id="user_123", github_user_id=123000, github_login="user_123")
+        session.add(user)
+        await session.flush()
         ws = await session.get(Workspace, ws_id)
         if not ws:
-            ws = Workspace(id=ws_id, name="Engineering Security Team", owner_id="user_123")
+            ws = Workspace(id=ws_id, name="Engineering Security Team", owner_id=user.id)
             session.add(ws)
             await session.flush()
 
@@ -594,21 +608,36 @@ async def test_worker_failure_lifecycle_audit_events(monkeypatch: pytest.MonkeyP
 
 
 def test_stale_api_error_messages_updated() -> None:
-    with TestClient(app) as client:
-        # 1. Non-existent scan lookup
-        res_get = client.get("/api/scans/non-existent-scan-id")
-        assert res_get.status_code == 404
-        assert res_get.json()["detail"] == "Scan not found."
-        assert "restart" not in res_get.json()["detail"].lower()
+    # 0. Unauthenticated access returns 401
+    with TestClient(app) as unauth_client:
+        assert unauth_client.get("/api/scans/non-existent-scan-id").status_code == 401
+        assert unauth_client.post("/api/scans/non-existent-scan-id/pull-request", json={"title": "Fix SQLi", "body": "PR"}).status_code == 401
 
-        # 2. Non-existent scan pull-request creation
-        res_pr = client.post(
-            "/api/scans/non-existent-scan-id/pull-request",
-            json={"title": "Fix SQLi", "body": "PR description"},
-        )
-        assert res_pr.status_code == 404
-        assert res_pr.json()["detail"] == "Scan not found."
-        assert "restart" not in res_pr.json()["detail"].lower()
+    auth_user = AuthenticatedUser(
+        user={"id": "test_stale_user", "login": "test_stale_user"},
+        workspace={"id": "default", "name": "Default Workspace"},
+        session={"id": "sess_stale"},
+        role="owner",
+    )
+    app.dependency_overrides[get_current_user] = lambda: auth_user
+    try:
+        with TestClient(app) as client:
+            # 1. Non-existent scan lookup
+            res_get = client.get("/api/scans/non-existent-scan-id")
+            assert res_get.status_code == 404
+            assert res_get.json()["detail"] == "Scan not found."
+            assert "restart" not in res_get.json()["detail"].lower()
+
+            # 2. Non-existent scan pull-request creation
+            res_pr = client.post(
+                "/api/scans/non-existent-scan-id/pull-request",
+                json={"title": "Fix SQLi Vulnerability", "body": "PR description"},
+            )
+            assert res_pr.status_code == 404
+            assert res_pr.json()["detail"] == "Scan not found."
+            assert "restart" not in res_pr.json()["detail"].lower()
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
 
 
 @pytest.mark.asyncio

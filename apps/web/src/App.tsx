@@ -44,6 +44,28 @@ type Scan = {
 type Health = { status: string; integrations: Record<string, boolean> };
 type GithubStatus = { configured: boolean; connected: boolean; app_slug?: string | null };
 
+type AuthUser = {
+  id: string;
+  github_user_id: number;
+  login: string;
+  name?: string | null;
+  avatar_url?: string | null;
+  email?: string | null;
+};
+
+type AuthWorkspace = {
+  id: string;
+  name: string;
+  role: string;
+  installation_id?: string | null;
+};
+
+type AuthResponse = {
+  authenticated: boolean;
+  user: AuthUser;
+  workspace: AuthWorkspace;
+};
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
@@ -69,6 +91,9 @@ function Icon({ children }: { children: ReactNode }) {
 }
 
 export default function App() {
+  const [auth, setAuth] = useState<AuthResponse | null>(null);
+  const [checkingAuth, setCheckingAuth] = useState(true);
+  const [authError, setAuthError] = useState('');
   const [health, setHealth] = useState<Health | null>(null);
   const [github, setGithub] = useState<GithubStatus | null>(null);
   const [repos, setRepos] = useState<Repo[]>([]);
@@ -93,14 +118,42 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    void Promise.all([
-      api<Health>('/api/health').then(setHealth).catch(() => undefined),
-      loadGithub(),
-    ]);
-    if (new URLSearchParams(window.location.search).get('github') === 'connected') {
+    const params = new URLSearchParams(window.location.search);
+    const authErr = params.get('auth_error');
+    if (authErr) {
+      setAuthError(authErr === 'state_mismatch' ? 'Security check failed (OAuth state mismatch). Please try signing in again.' : authErr);
+      window.history.replaceState({}, '', window.location.pathname);
+    } else if (params.get('auth') === 'success' || params.get('github') === 'connected') {
       window.history.replaceState({}, '', window.location.pathname);
     }
+
+    api<AuthResponse>('/api/auth/me')
+      .then((data) => {
+        setAuth(data);
+        setCheckingAuth(false);
+        void Promise.all([
+          api<Health>('/api/health').then(setHealth).catch(() => undefined),
+          loadGithub(),
+        ]);
+      })
+      .catch(() => {
+        setAuth(null);
+        setCheckingAuth(false);
+      });
   }, [loadGithub]);
+
+  const signOut = async () => {
+    try {
+      await api('/api/auth/logout', { method: 'POST' });
+    } catch {
+      /* ignore network errors on logout */
+    }
+    setAuth(null);
+    setGithub(null);
+    setRepos([]);
+    setSelectedRepo('');
+    setScan(null);
+  };
 
   const connectGithub = async () => {
     setError('');
@@ -190,6 +243,89 @@ export default function App() {
   const verified = Boolean(scan?.verification?.eligible_for_pr);
   const integrationCount = useMemo(() => Object.values(health?.integrations || {}).filter(Boolean).length, [health]);
 
+  if (checkingAuth) {
+    return (
+      <div className="login-shell">
+        <div className="login-loading">
+          <span className="spinner" />
+          <span>Connecting to workspace…</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!auth) {
+    return (
+      <div className="login-shell">
+        <div className="login-card">
+          <div className="login-brand">
+            <div className="brand-mark">
+              <span>R</span>
+              <i aria-hidden="true" />
+            </div>
+            <div>
+              <div className="brand-name">raksa<span>.</span></div>
+              <div className="brand-caption">AUTONOMOUS APPSEC</div>
+            </div>
+          </div>
+
+          <h1 className="login-title">Sign in to Raksa</h1>
+          <p className="login-subtitle">
+            Autonomous application security workflow for detecting, reproducing, and verifying SQL injection remediations.
+          </p>
+
+          {authError && (
+            <div className="login-error" role="alert">
+              <span aria-hidden="true">⚠</span>
+              <span>{authError}</span>
+              <button
+                type="button"
+                className="login-error-dismiss"
+                onClick={() => setAuthError('')}
+                aria-label="Dismiss error"
+              >
+                ×
+              </button>
+            </div>
+          )}
+
+          <a href="/api/auth/login" className="login-github-button">
+            <svg
+              className="github-svg"
+              viewBox="0 0 24 24"
+              width="20"
+              height="20"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" />
+            </svg>
+            <span>Continue with GitHub</span>
+          </a>
+
+          <div className="login-features">
+            <div className="login-feature-row">
+              <span className="check" aria-hidden="true">✓</span>
+              <span>Zero-config AST analysis for Python SQL injection (CWE-89)</span>
+            </div>
+            <div className="login-feature-row">
+              <span className="check" aria-hidden="true">✓</span>
+              <span>Exact-context parameterized fix synthesis with Nemotron</span>
+            </div>
+            <div className="login-feature-row">
+              <span className="check" aria-hidden="true">✓</span>
+              <span>Deterministic sandbox test verification before draft PRs</span>
+            </div>
+          </div>
+
+          <p className="login-disclaimer">
+            <strong>Security boundary:</strong> Raksa uses OAuth solely to verify your GitHub identity. Source repository access is governed separately through explicit GitHub App installations.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -246,12 +382,18 @@ export default function App() {
             <div className="provider-foot">{integrationCount} integrations operational</div>
           </div>
           <div className="user-note">
-            <div className="avatar" aria-hidden="true">RK</div>
-            <div>
-              <strong>Local workspace</strong>
-              <span>Security review session</span>
+            <div className="avatar" aria-hidden="true">
+              {auth.user.avatar_url ? (
+                <img src={auth.user.avatar_url} alt="" className="avatar-img" />
+              ) : (
+                (auth.user.login || 'RK').slice(0, 2).toUpperCase()
+              )}
             </div>
-            <span className="local-tag">ACTIVE</span>
+            <div>
+              <strong>{auth.user.name || `@${auth.user.login}`}</strong>
+              <span>{auth.workspace.name}</span>
+            </div>
+            <span className="local-tag">{auth.workspace.role.toUpperCase()}</span>
           </div>
         </div>
       </aside>
@@ -267,6 +409,14 @@ export default function App() {
             <span className="system-status">
               <i aria-hidden="true" /> API {health?.status === 'ok' ? 'operational' : 'checking'}
             </span>
+            <button
+              type="button"
+              className="signout-button"
+              onClick={signOut}
+              title="Sign out of Raksa"
+            >
+              Sign out
+            </button>
           </div>
         </header>
 

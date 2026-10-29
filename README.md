@@ -119,25 +119,33 @@ NEBIUS_PROJECT=your-token-factory-project-id
 
 For local Docker-based test execution, set `SANDBOX_PROVIDER=docker`. The available providers are `demo`, `docker`, and `nebius`. If sandbox access is unavailable or misconfigured, Raksa reports an error rather than claiming that tests passed.
 
-## Connect GitHub
+## Connect GitHub & OAuth
 
-Create a GitHub App and configure the application URL and callback for your environment. For local development, use:
+Raksa uses your GitHub App for both human OAuth authentication and fine-grained repository scanning:
 
-- **Setup URL:** `http://localhost:8000/api/github/callback`
-- **Repository permissions:** Metadata (read), Contents (read/write), Pull requests (read/write)
-- **Webhook:** not required for the current workflow
+- **OAuth User Authorization Callback URL:** `http://localhost:8000/api/auth/callback`
+- **Setup URL (GitHub App Installation):** `http://localhost:8000/api/github/callback`
+- **Webhook URL:** `http://localhost:8000/api/github/webhook` (subscribe to `Pull request` events)
+- **Repository permissions:**
+  - `Repository contents`: Read-only (or Read/Write if creating draft PRs)
+  - `Pull requests`: Read/Write
+  - `Checks`: Read/Write (for automated PR reviews)
 
-Set these values in `.env`:
+Configure these variables in `.env`:
 
 ```dotenv
+# GitHub App & OAuth (from GitHub App settings under General)
 GITHUB_APP_ID=...
 GITHUB_APP_SLUG=your-app-slug
+GITHUB_CLIENT_ID=...
+GITHUB_CLIENT_SECRET=...
 GITHUB_PRIVATE_KEY_PATH=/absolute/path/to/your-app.private-key.pem
+GITHUB_WEBHOOK_SECRET=...
 GITHUB_API_BASE_URL=https://api.github.com
 FRONTEND_URL=http://localhost:5173
 ```
 
-Install the GitHub App on a test repository, select **Connect GitHub** in Raksa, and choose the repository. Raksa uses short-lived installation tokens rather than requiring a personal access token.
+Sign in with **Continue with GitHub** on the dashboard. Then click **Connect GitHub** to link repositories via the GitHub App. Raksa uses short-lived installation tokens for repository operations and never stores user personal access tokens.
 
 ### Pull-request safeguards
 

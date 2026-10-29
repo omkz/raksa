@@ -1,5 +1,13 @@
 from app.db.base import Base
-from app.db.models import AuditEvent, Finding, ScanJob, Workspace
+from app.db.models import (
+    AuditEvent,
+    Finding,
+    ScanJob,
+    User,
+    UserSession,
+    Workspace,
+    WorkspaceMember,
+)
 from app.db.session import (
     async_session_scope,
     check_db_health,
@@ -15,7 +23,10 @@ __all__ = [
     "Base",
     "Finding",
     "ScanJob",
+    "User",
+    "UserSession",
     "Workspace",
+    "WorkspaceMember",
     "async_session_scope",
     "check_db_health",
     "close_db",

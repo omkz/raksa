@@ -5,10 +5,12 @@ import uuid
 from typing import Any
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
 from app.config import settings
+from app.dependencies import AuthenticatedUser, get_current_user, get_optional_user
+from app.services.auth import set_workspace_installation_id
 from app.services.github_app import GitHubAppError, github_app, verify_webhook_signature
 from app.state import create_scan_job, get_active_job_by_head_sha, get_job_by_delivery_id
 
@@ -17,18 +19,30 @@ router = APIRouter(prefix="/api/github", tags=["github"])
 
 
 @router.get("/status")
-async def github_status(request: Request) -> dict[str, object]:
-    installation_id = request.session.get("installation_id")
+async def github_status(
+    request: Request,
+    auth: AuthenticatedUser | None = Depends(get_optional_user),
+) -> dict[str, object]:
+    installation_id = None
+    if auth:
+        installation_id = auth.workspace.get("installation_id") or request.session.get("installation_id")
+    else:
+        installation_id = request.session.get("installation_id")
+
     return {
         "configured": github_app.configured,
         "connected": bool(installation_id),
         "installation_id": str(installation_id) if installation_id else None,
         "app_slug": settings.github_app_slug or None,
+        "authenticated": bool(auth),
     }
 
 
 @router.get("/install-url")
-async def github_install_url(request: Request) -> dict[str, str]:
+async def github_install_url(
+    request: Request,
+    auth: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, str]:
     if not github_app.configured:
         raise HTTPException(503, "Configure GITHUB_APP_ID, GITHUB_APP_SLUG, and GITHUB_PRIVATE_KEY(_PATH) first.")
     state = secrets.token_urlsafe(24)
@@ -38,25 +52,41 @@ async def github_install_url(request: Request) -> dict[str, str]:
 
 
 @router.get("/callback")
-async def github_callback(request: Request, installation_id: str = "", setup_action: str = "", state: str = "") -> RedirectResponse:
+async def github_callback(
+    request: Request,
+    installation_id: str = "",
+    setup_action: str = "",
+    state: str = "",
+    auth: AuthenticatedUser = Depends(get_current_user),
+) -> RedirectResponse:
     expected = request.session.pop("github_install_state", None)
     if not expected or not state or not secrets.compare_digest(str(expected), state):
         raise HTTPException(400, "GitHub installation state did not match. Start the connection flow again.")
     if setup_action not in {"install", "update", "request"} or not installation_id.isdigit():
         raise HTTPException(400, "GitHub did not return a valid installation. Try connecting again.")
+
+    # Save to user's workspace and session
+    await set_workspace_installation_id(auth.workspace_id, installation_id)
     request.session["installation_id"] = installation_id
     return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/?github=connected", status_code=303)
 
 
 @router.post("/disconnect")
-async def github_disconnect(request: Request) -> dict[str, bool]:
+async def github_disconnect(
+    request: Request,
+    auth: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, bool]:
+    await set_workspace_installation_id(auth.workspace_id, None)
     request.session.pop("installation_id", None)
     return {"connected": False}
 
 
 @router.get("/repositories")
-async def github_repositories(request: Request) -> list[dict[str, object]]:
-    installation_id = request.session.get("installation_id")
+async def github_repositories(
+    request: Request,
+    auth: AuthenticatedUser = Depends(get_current_user),
+) -> list[dict[str, object]]:
+    installation_id = auth.workspace.get("installation_id") or request.session.get("installation_id")
     if not installation_id:
         raise HTTPException(401, "Connect the Raksa GitHub App first.")
     try:
@@ -70,7 +100,12 @@ async def github_webhook(request: Request) -> dict[str, Any]:
     raw_body = await request.body()
     signature = request.headers.get("X-Hub-Signature-256")
 
-    # 1. Verify webhook signature if secret configured
+    # 1. Reject requests in production if webhook secret is missing
+    if settings.app_env == "production" and not settings.github_webhook_secret:
+        logger.error("GitHub webhook rejected: GITHUB_WEBHOOK_SECRET is not configured in production.")
+        raise HTTPException(500, "Webhook secret not configured in production.")
+
+    # 2. Verify webhook signature if secret configured
     if settings.github_webhook_secret:
         if not verify_webhook_signature(raw_body, signature, settings.github_webhook_secret):
             raise HTTPException(401, "Invalid or missing webhook signature.")

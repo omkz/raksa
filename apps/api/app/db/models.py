@@ -22,12 +22,15 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-class Workspace(Base):
-    __tablename__ = "workspaces"
+class User(Base):
+    __tablename__ = "users"
 
-    id: Mapped[str] = mapped_column(String(64), primary_key=True, default="default")
-    name: Mapped[str] = mapped_column(String(255), nullable=False, default="Default Workspace")
-    owner_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    github_user_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False, index=True)
+    github_login: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    avatar_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -42,6 +45,58 @@ class Workspace(Base):
         onupdate=utc_now,
     )
 
+    owned_workspaces: Mapped[list["Workspace"]] = relationship(
+        "Workspace", foreign_keys="[Workspace.owner_id]", back_populates="owner"
+    )
+    memberships: Mapped[list["WorkspaceMember"]] = relationship(
+        "WorkspaceMember", back_populates="user", cascade="all, delete-orphan"
+    )
+    sessions: Mapped[list["UserSession"]] = relationship(
+        "UserSession", back_populates="user", cascade="all, delete-orphan"
+    )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "github_user_id": self.github_user_id,
+            "login": self.github_login,
+            "name": self.name,
+            "email": self.email,
+            "avatar_url": self.avatar_url,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class Workspace(Base):
+    __tablename__ = "workspaces"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default="default")
+    name: Mapped[str] = mapped_column(String(255), nullable=False, default="Default Workspace")
+    owner_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    installation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utc_now,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utc_now,
+        server_default=func.now(),
+        onupdate=utc_now,
+    )
+
+    owner: Mapped["User | None"] = relationship(
+        "User", foreign_keys=[owner_id], back_populates="owned_workspaces"
+    )
+    members: Mapped[list["WorkspaceMember"]] = relationship(
+        "WorkspaceMember", back_populates="workspace", cascade="all, delete-orphan"
+    )
     scans: Mapped[list["ScanJob"]] = relationship(
         "ScanJob", back_populates="workspace", cascade="all, delete-orphan"
     )
@@ -55,8 +110,78 @@ class Workspace(Base):
             "id": self.id,
             "name": self.name,
             "owner_id": self.owner_id,
+            "installation_id": getattr(self, "installation_id", None),
             "created_at": created.isoformat() if created else None,
             "updated_at": updated.isoformat() if updated else None,
+        }
+
+
+class WorkspaceMember(Base):
+    __tablename__ = "workspace_members"
+
+    workspace_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    role: Mapped[str] = mapped_column(String(32), nullable=False, default="owner")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utc_now,
+        server_default=func.now(),
+    )
+
+    workspace: Mapped["Workspace"] = relationship("Workspace", back_populates="members")
+    user: Mapped["User"] = relationship("User", back_populates="memberships")
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "workspace_id": self.workspace_id,
+            "user_id": self.user_id,
+            "role": self.role,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    active_workspace_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("workspaces.id", ondelete="SET NULL"), nullable=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utc_now,
+        server_default=func.now(),
+    )
+    last_active_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utc_now,
+        server_default=func.now(),
+    )
+
+    user: Mapped["User"] = relationship("User", back_populates="sessions")
+    active_workspace: Mapped["Workspace | None"] = relationship("Workspace")
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "active_workspace_id": self.active_workspace_id,
+            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "last_active_at": self.last_active_at.isoformat() if self.last_active_at else None,
         }
 
 
