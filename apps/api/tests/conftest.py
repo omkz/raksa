@@ -9,6 +9,14 @@ os.environ["WORKER_ENABLED"] = "false"
 
 
 @pytest.fixture(autouse=True)
+def disable_optional_scanners_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep tests independent of local .env and Docker; scanner-specific tests opt in."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "opengrep_enabled", False)
+
+
+@pytest.fixture(autouse=True)
 async def clean_database_jobs() -> None:
     from app.db.models import ScanJob, User, UserSession, Workspace, WorkspaceMember
     from app.db.session import async_session_scope
