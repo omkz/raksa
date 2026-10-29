@@ -104,8 +104,11 @@ class OpenGrepScanner:
         total_bytes = 0
         with tempfile.TemporaryDirectory(prefix="raksa-opengrep-") as directory:
             root = Path(directory)
+            # Docker container runs as an unprivileged user, so it needs
+            # traversal access to the temporary parent directory.
+            os.chmod(root, 0o755)
             workspace = root / "workspace"
-            workspace.mkdir()
+            workspace.mkdir(mode=0o755)
             for path, content in files.items():
                 if not _safe_path(path) or not isinstance(content, str):
                     raise ValueError("Unsafe file.")
