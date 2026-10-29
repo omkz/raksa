@@ -333,7 +333,7 @@ def _format_check_run_output(
         lines.append(f"- **Commit:** `{head_sha[:7]}`")
 
     if not findings:
-        lines.append("\n**Result:** No findings detected by enabled rules. This is not a complete security audit.")
+        lines.append("\n**Result:** No SQL injection or critical security vulnerabilities detected. Scanner coverage is limited; this is not a complete audit.")
     for scanner in scanner_reports or []:
         lines.append(f"- **{scanner['name']}**: {scanner['status']} ({scanner['finding_count']} finding(s)). {scanner['message']}")
     else:
