@@ -32,6 +32,8 @@ class Finding(BaseModel):
     description: str
     confidence: float = Field(ge=0, le=1)
     status: Literal["potential", "reproduced", "fixed", "unverified"] = "potential"
+    scanner: str = "raksa"
+    rule_id: str | None = None
 
 
 class PatchProposal(BaseModel):
