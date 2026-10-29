@@ -300,7 +300,7 @@ def validate_patch_proposal(
     if validation_error:
         return None, validation_error
 
-    reason = str(proposal.get("reason", "Targeted SQL query remediation"))[:1000]
+    reason = str(proposal.get("reason", "Security remediation proposal"))[:1000]
     return {
         "path": expected_path,
         "old_text": old_text,
