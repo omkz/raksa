@@ -1,8 +1,9 @@
 # Scanner Platform v1 — OpenGrep
 
 Raksa's first optional adapter executes OpenGrep in a dedicated Docker container
-using two **original Raksa rules** (Python shell invocation, JavaScript/TypeScript
-dynamic evaluation). Both are *potential* findings, not exploit proofs.
+using five **original Raksa rules** (Python shell invocation, JavaScript/TypeScript
+dynamic evaluation, DOM HTML sinks, and direct request-parameter file access in
+Python and JavaScript). These are *potential* findings, not exploit proofs.
 
 ## Installation
 
@@ -30,10 +31,17 @@ scanner error, not an assertion that the repository is safe.
 
 - **Current input is the bounded GitHub API text snapshot**, not complete clone.
   Git history, skipped files, or files above snapshot limits are not scanned.
-- Only Python SQL injection findings from Raksa's existing AST analyzer are
-  currently eligible for AI patch generation and exploit/regression verification.
-- New OpenGrep findings are reported and stored but are **not auto-remediated**;
-  the existing verification gate is unchanged.
+- Python SQL injection findings from Raksa's existing AST analyzer retain their
+  specialist differential exploit/regression verification gate.
+- OpenGrep findings can now receive **AI patch proposals** (requires Nemotron)
+  with exact source-context validation. These are **not verified** by the current
+  SQLi-only gate. Any scan with an accepted OpenGrep patch is **unverified**
+  and **ineligible for draft PR creation**, even when a SQLi patch is also present.
+- XSS and Path Traversal rules are deliberately high-signal **sink patterns**,
+  not complete taint-flow analysis. They cover browser DOM sinks and direct
+  request-parameter file reads in selected Python/JS frameworks, but many
+  frameworks, indirect flows, and sanitization cases are not covered.
+  False positives are possible.
 - Rule coverage is minimal. This release does not deliver a comprehensive SAST
   ruleset or full multilang security review.
 - OpenGrep engine uses LGPL-2.1. The bundled rules are authored by Raksa; no
