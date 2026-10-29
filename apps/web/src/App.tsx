@@ -23,7 +23,7 @@ type Finding = {
   rule_id?: string | null;
 };
 
-type Patch = { path: string; old_text: string; new_text: string; reason: string };
+type Patch = { path: string; old_text: string; new_text: string; reason: string; scanner?: string; cwe?: string; finding_id?: string };
 type Scan = {
   id: string;
   status: 'queued' | 'running' | 'completed' | 'failed';
@@ -779,7 +779,7 @@ export default function App() {
                       <div className="patch-reason" key={`${patch.path}-${index}`}>
                         <span>REMEDIATION RATIONALE</span>
                         <p>{patch.reason}</p>
-                        <small>{patch.path}</small>
+                        <small>{patch.path}{patch.cwe ? ` · ${patch.cwe}` : ''}{patch.scanner ? ` · ${patch.scanner}` : ''} · AI PROPOSAL — NOT AUTOMATICALLY VERIFIED</small>
                       </div>
                     ))}
                   </div>
