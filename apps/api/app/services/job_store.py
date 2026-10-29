@@ -251,6 +251,8 @@ async def _sync_findings(session: Any, scan_id: str, findings_data: list[dict[st
             description=str(item.get("description", "")),
             confidence=float(item.get("confidence", 0.5)),
             status=str(item.get("status", "potential")),
+            scanner=str(item.get("scanner", "raksa")),
+            rule_id=item.get("rule_id"),
         )
         session.add(finding)
 
