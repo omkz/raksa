@@ -152,7 +152,8 @@ class NebiusService:
             "If the safe policy or expected behavior is unknown, abstain rather than invent it. "
             "Return ONLY JSON with path, old_text, new_text, reason. old_text must match exactly once "
             "including indentation; new_text must be nonempty, different, and syntactically appropriate. "
-            "If no safe fix can be proposed, use empty old_text and new_text. "
+            "If no safe fix can be proposed, set BOTH old_text and new_text to empty strings, "
+            "and explain the missing safety policy or functional requirement in reason. "
             "Never claim that a fix was verified or that tests passed."
         )
         sql_system = (
@@ -235,7 +236,8 @@ class NebiusService:
             "Return ONLY valid JSON with path, old_text, new_text and reason. "
             "Use the exact existing path, a unique literal old_text copied from the source, "
             "and a different nonempty new_text. Do not claim tests passed or remove functionality. "
-            "If you cannot construct a safe patch, return empty replacement strings."
+            "If a safe behavior-preserving patch cannot be determined, return BOTH "
+            "old_text and new_text as empty strings and explain why in reason."
         )
         sqli_corrective_prompt = (
             f"Your previous proposal for {path} was rejected due to the following validation error:\n"
