@@ -1,12 +1,27 @@
 # Raksa
 
-**AI-assisted application security remediation**
+**Your AI Security Engineer**
 
-Security findings should lead to fixes, not just alerts.
+### Security fixes. Proven.
 
-Raksa helps developers investigate potential code vulnerabilities, prepare focused remediations, and review verification evidence before sharing a change through GitHub. It combines repository analysis, AI-assisted patching, security checks, and human approval in one workflow.
+Raksa is an open-source, AI-assisted application security engineer for developers and engineering teams. It investigates potential vulnerabilities, proposes focused fixes, and surfaces verification evidence before a developer approves a GitHub pull request.
 
-## How it works
+**Investigate → Remediate → Verify → Review.** Raksa focuses on actionable fixes backed by the checks that actually ran—not more alert noise.
+
+> **Current scope:** Python SQL injection (CWE-89) detection and remediation. Findings are potential issues until tested. Verified results are specific to the executed checks, not a guarantee that the repository is fully secure. Human review remains required.
+
+[Explore the demo repository](https://github.com/omkz/raksa-vulnerable-demo/pulls) · [Get started locally](#run-locally)
+
+## Why Raksa?
+
+- **From findings to fixes:** Instead of stopping at an alert, Raksa prepares narrowly scoped, reviewable code changes.
+- **Evidence over assertions:** Static rechecks and optional isolated exploit/regression checks distinguish a proposed fix from a tested one.
+- **Developers stay in control:** Repository permissions are GitHub App-scoped. Patch approval is explicit, and Raksa never merges or pushes to the default branch.
+- **Open and inspectable:** Review the generated diff, check results, and open-source implementation.
+
+
+
+## How Raksa works
 
 1. **Connect a repository.** Raksa uses a GitHub App to access repositories within an installation and takes a bounded snapshot of the selected source.
 2. **Find a potential issue.** The current analysis focuses on possible SQL injection in Python code. Findings are leads to investigate, not proof of exploitability.
@@ -173,7 +188,11 @@ pnpm --dir apps/web build
 
 Repository source is sent to Nebius for model analysis when model features are enabled. If a sandbox provider is configured, the repository snapshot is also sent to that provider for isolated test execution. Only connect repositories you are authorized to process.
 
-Before operating Raksa as a shared or public service, configure deployment-appropriate authentication and authorization, durable job storage, rate limiting, audit logging, secret management, retention policies, and resource limits. Review the security properties of the entire deployment, especially sandbox isolation and access to GitHub credentials. Keep `.env` files and GitHub App private keys out of version control.
+Before operating Raksa as a shared or public service, review deployment-appropriate authentication and authorization, rate limiting, audit logging, secret management, retention policies, and resource limits. PostgreSQL-backed job storage, GitHub OAuth sessions, and audit events exist in the codebase, but a production deployment still requires security review and hardening. Review the security properties of the entire deployment, especially sandbox isolation and access to GitHub credentials. Keep `.env` files and GitHub App private keys out of version control.
+
+## Brand
+
+Raksa uses **Your AI Security Engineer** as its product positioning and **Security fixes. Proven.** as its primary tagline. The proof claim always refers to the scope of checks actually executed. See [Brand Guidelines](docs/BRAND.md).
 
 ## License
 
