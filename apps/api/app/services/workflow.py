@@ -4,8 +4,8 @@ import uuid
 from typing import Any
 
 from app.config import settings
-from app.services.analyzer import apply_exact_replacements, detect_sql_injection
 from app.scanners.registry import scan_snapshot
+from app.services.analyzer import apply_exact_replacements, detect_sql_injection
 from app.services.github_app import github_app
 from app.services.nebius import NebiusUnavailable, nebius
 from app.services.sandbox import sandbox
