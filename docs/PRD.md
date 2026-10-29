@@ -1,9 +1,13 @@
 # Raksa — Product Requirements Document
 
 ## Product
-Raksa is an autonomous Application Security (AppSec) agent that identifies application-code vulnerabilities, reproduces them through security tests, proposes fixes, and verifies results.
+Raksa is an AI-assisted security engineer that identifies application-code vulnerabilities, reproduces them through security tests, proposes fixes, and verifies results.
 
-**Tagline:** Find it. Prove it. Fix it. Verify it.
+**Positioning:** Your AI Security Engineer
+
+**Tagline:** Security fixes. Proven.
+
+**Brand promise:** Investigate → Remediate → Verify → Review, with transparent evidence from checks actually executed and developer approval before PR creation.
 
 ## Users
 Software developers and engineering teams who want to remediate application vulnerabilities faster and review evidence before merging.
