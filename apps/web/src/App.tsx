@@ -798,7 +798,7 @@ export default function App() {
                             : scan.verification.regression_tests?.status === 'unavailable'
                             ? 'Security verified (regression coverage unavailable)'
                             : 'Verification gate passed'
-                          : 'Verification evidence'}
+                          : 'Verification not completed'}
                       </strong>
                       <p>{String(scan.verification.message || scan.verification.evidence || 'No verification details available.')}</p>
 
@@ -896,9 +896,17 @@ export default function App() {
                   </div>
                 )}
 
-                {scan.patch_messages?.map((message) => (
-                  <p className="small-warning" key={message}>⚠ {message}</p>
-                ))}
+                {scan.patch_messages && scan.patch_messages.length > 0 && (
+                  <div className="summary-box">
+                    <div className="summary-head">
+                      <strong>AI patch proposal diagnostics</strong>
+                      <small>NOT VERIFICATION EVIDENCE</small>
+                    </div>
+                    {scan.patch_messages.map((message) => (
+                      <p className="small-warning" key={message}>⚠ {message}</p>
+                    ))}
+                  </div>
+                )}
 
                 {prUrl && (
                   <div className="pr-success">
