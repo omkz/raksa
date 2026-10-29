@@ -336,6 +336,8 @@ class Finding(Base):
     description: Mapped[str] = mapped_column(Text, nullable=False)
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="potential")
+    scanner: Mapped[str] = mapped_column(String(32), nullable=False, default="raksa", server_default="raksa")
+    rule_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -355,6 +357,8 @@ class Finding(Base):
             "description": self.description,
             "confidence": self.confidence,
             "status": self.status,
+            "scanner": self.scanner,
+            "rule_id": self.rule_id,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 

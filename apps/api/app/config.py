@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     max_repository_bytes: int = 1_200_000
     max_findings: int = 10
 
+    opengrep_enabled: bool = False
+    opengrep_image: str = "raksa-opengrep:v1.30.0"
+    opengrep_timeout_seconds: int = 120
+
     database_url: str = "postgresql+asyncpg://raksa:raksa@localhost:5432/raksa"
     worker_enabled: bool = True
     worker_poll_interval_seconds: float = 1.0

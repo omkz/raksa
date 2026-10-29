@@ -1,0 +1,21 @@
+# Original Raksa-owned rules; static warnings only. No third-party registry rules.
+rules:
+  - id: raksa.python-shell-execution
+    languages: [python]
+    severity: WARNING
+    message: "Potential shell injection: inspect whether untrusted input reaches shell execution."
+    metadata:
+      cwe: CWE-78
+    pattern-either:
+      - pattern: os.system($COMMAND)
+      - pattern: subprocess.run($COMMAND, shell=True, ...)
+      - pattern: subprocess.Popen($COMMAND, shell=True, ...)
+  - id: raksa.javascript-dynamic-eval
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: "Dynamic code execution: inspect whether evaluated code is trusted."
+    metadata:
+      cwe: CWE-94
+    pattern-either:
+      - pattern: eval($EXPRESSION)
+      - pattern: new Function(...)

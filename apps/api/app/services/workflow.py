@@ -5,6 +5,7 @@ from typing import Any
 
 from app.config import settings
 from app.services.analyzer import apply_exact_replacements, detect_sql_injection
+from app.scanners.registry import scan_snapshot
 from app.services.github_app import github_app
 from app.services.nebius import NebiusUnavailable, nebius
 from app.services.sandbox import sandbox
@@ -69,18 +70,24 @@ async def run_scan_job(
             message=f"Analyzing {len(files)} source and test files for potential SQL injection…",
             source_files=files,
         )
-        findings = detect_sql_injection(files, max_findings=settings.max_findings)
+        native_findings = detect_sql_injection(files, max_findings=settings.max_findings)
+        scanner_results = await scan_snapshot(files, max_findings=settings.max_findings)
+        scanner_reports = [result.report() for result in scanner_results]
+        findings = list(native_findings)
+        for scanner_result in scanner_results:
+            room = max(0, settings.max_findings - len(findings))
+            findings.extend(item.as_dict() for item in scanner_result.findings[:room])
         research: list[dict[str, str]] = []
-        if findings:
+        if native_findings:
             try:
                 research = await tavily.research_sql_injection()
             except Exception as exc:
                 research = [{"title": "Security research unavailable", "url": "", "content": f"Tavily request failed: {exc.__class__.__name__}"}]
 
         summary = ""
-        if findings and nebius.configured:
+        if native_findings and nebius.configured:
             try:
-                summary = await nebius.summarize_findings(findings, files)
+                summary = await nebius.summarize_findings(native_findings, files)
             except NebiusUnavailable as exc:
                 summary = str(exc)
         elif not nebius.configured:
@@ -90,14 +97,14 @@ async def run_scan_job(
         candidate_proposals: list[dict[str, str]] = []
         patched_files = dict(files)
         patch_messages: list[str] = []
-        if findings and nebius.configured:
+        if native_findings and nebius.configured:
             await update_job(
                 scan_id,
                 expected_worker_id=worker_id,
                 stage="remediating",
                 message="Requesting a constrained remediation proposal from Nemotron…",
             )
-            for finding in findings[:3]:
+            for finding in native_findings[:3]:
                 path = finding.get("path", "")
                 source = files.get(path, "")
                 if not source:
@@ -151,7 +158,7 @@ async def run_scan_job(
             gate_result = await verify_remediation(
                 files=files,
                 patched_files=patched_files,
-                findings=findings,
+                findings=native_findings,
                 sandbox_service=sandbox,
                 nebius_service=nebius,
                 patches=proposals,
@@ -197,6 +204,8 @@ async def run_scan_job(
                 "eligible_for_pr": False,
             }
 
+        verification["scanner_runs"] = scanner_reports
+
         await complete_job(
             scan_id,
             worker_id=worker_id,
@@ -225,6 +234,7 @@ async def run_scan_job(
                     pr_changed_files=pr_changed_files,
                     summary_text=summary,
                     patch_diff=patch_diff,
+                    scanner_reports=scanner_reports,
                 )
                 await github_app.update_check_run(
                     installation_id,
@@ -300,15 +310,18 @@ def _format_check_run_output(
     pr_changed_files: list[str],
     summary_text: str = "",
     patch_diff: str = "",
+    scanner_reports: list[dict[str, Any]] | None = None,
 ) -> tuple[str, str, str, str | None]:
     """Return (conclusion, title, summary, text) for a GitHub Check Run."""
+    partial_scan = any(s.get("status") in {"partial", "error", "unavailable"} for s in (scanner_reports or []))
     if findings:
         conclusion = "failure"
         count = len(findings)
         title = f"Raksa Security Review: {count} Potential {'Vulnerability' if count == 1 else 'Vulnerabilities'} Detected"
     else:
-        conclusion = "success"
-        title = "Raksa Security Review: No Vulnerabilities Detected"
+        conclusion = "neutral" if partial_scan else "success"
+        title = ("Raksa Security Review: Scanner Coverage Incomplete" if partial_scan
+                 else "Raksa Security Review: No Vulnerabilities Detected")
 
     lines = [
         "### Raksa Security Review Summary",
@@ -320,7 +333,9 @@ def _format_check_run_output(
         lines.append(f"- **Commit:** `{head_sha[:7]}`")
 
     if not findings:
-        lines.append("\n**Result:** No SQL injection or critical security vulnerabilities detected.")
+        lines.append("\n**Result:** No SQL injection or critical security vulnerabilities detected. Scanner coverage is limited; this is not a complete audit.")
+    for scanner in scanner_reports or []:
+        lines.append(f"- **{scanner['name']}**: {scanner['status']} ({scanner['finding_count']} finding(s)). {scanner['message']}")
     else:
         lines.append(f"\n#### Findings ({len(findings)})")
         changed_set = set(pr_changed_files or [])
@@ -329,11 +344,11 @@ def _format_check_run_output(
             title_f = f.get("title", "Potential Vulnerability")
             path = f.get("path", "unknown")
             line = f.get("line", 1)
-            cwe = f.get("cwe") or "CWE-89"
+            cwe = f.get("cwe") or "Unclassified"
             in_diff = " *(modified in this PR)*" if path in changed_set else ""
             evidence = f.get("evidence", "").strip()
             lines.append(f"{i}. **[{sev}] {title_f}** (`{path}:{line}`){in_diff}")
-            lines.append(f"   - CWE: {cwe}")
+            lines.append(f"   - CWE: {cwe}; scanner: {f.get('scanner', 'raksa')}")
             if evidence:
                 lines.append(f"   - Evidence: `{evidence}`")
 
