@@ -474,7 +474,7 @@ async def test_python_missing_import_causes_corrective_model_retry() -> None:
         finding={"scanner": "opengrep", "cwe": "CWE-78", "line": 4},
         diagnostics=diagnostics,
     )
-    assert result == {**good_patch, "reason": "Targeted SQL query remediation"}
+    assert result == {**good_patch, "reason": "Security remediation proposal"}
     assert mock_client.chat.completions.create.await_count == 2
     retry_messages = mock_client.chat.completions.create.await_args.kwargs["messages"]
     assert "Missing Python module import" in retry_messages[-1]["content"]
