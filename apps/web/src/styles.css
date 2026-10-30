@@ -1426,6 +1426,188 @@ h1 em {
   margin: 10px 0 0;
 }
 
+/* Autopilot review notes: concise by default; technical logs on demand. */
+.autopilot-notices {
+  border: 1px solid var(--line);
+  background: #0c121c;
+  border-radius: 10px;
+  margin: 16px 0;
+  overflow: hidden;
+}
+
+.autopilot-notices-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.autopilot-notices-head strong {
+  color: #e2e8f0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.autopilot-notices-head p,
+.autopilot-notices-foot {
+  color: #94a3b8;
+  font-size: 11px;
+  line-height: 1.6;
+  margin: 6px 0 0;
+}
+
+.autopilot-notices-head > span {
+  flex-shrink: 0;
+  color: #94a3b8;
+  font: 10px 'DM Mono', monospace;
+  letter-spacing: 0.5px;
+}
+
+.autopilot-notice {
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.autopilot-notice-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.autopilot-notice-top > div {
+  min-width: 0;
+}
+
+.autopilot-notice-mark {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 50%;
+  color: #94a3b8;
+  font: 600 12px 'DM Mono', monospace;
+}
+
+.autopilot-notice-mark.rejected {
+  color: #fbbf24;
+  border-color: rgba(251, 191, 36, 0.3);
+}
+
+.autopilot-notice-mark.context {
+  color: #67e8f9;
+  border-color: rgba(103, 232, 249, 0.3);
+}
+
+.autopilot-notice-top strong {
+  display: block;
+  font-size: 12px;
+  color: #e2e8f0;
+}
+
+.autopilot-notice-file {
+  display: block;
+  color: #94a3b8;
+  font: 10px/1.6 'DM Mono', monospace;
+  overflow-wrap: anywhere;
+  margin-top: 2px;
+}
+
+.autopilot-notice-top p {
+  color: #cbd5e1;
+  font-size: 11px;
+  line-height: 1.7;
+  margin: 7px 0 2px;
+}
+
+.autopilot-notice-detail {
+  margin: 10px 0 0 34px;
+  color: #94a3b8;
+  font-size: 11px;
+}
+
+.autopilot-notice-detail summary {
+  cursor: pointer;
+  width: fit-content;
+  color: #99f6e4;
+  line-height: 1.8;
+}
+
+.autopilot-notice-detail summary:hover {
+  color: #ccfbf1;
+}
+
+.autopilot-notice-detail summary:focus-visible {
+  outline: 2px solid #5eead4;
+  outline-offset: 3px;
+}
+
+.autopilot-technical-message {
+  color: #94a3b8;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  margin: 8px 0;
+}
+
+.autopilot-policy-form {
+  display: grid;
+  gap: 9px;
+  margin: 10px 0 14px;
+}
+
+.autopilot-policy-form label {
+  color: #cbd5e1;
+  line-height: 1.5;
+}
+
+.autopilot-policy-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.autopilot-policy-controls input {
+  flex: 1 1 170px;
+  min-width: 0;
+}
+
+.autopilot-policy-controls button {
+  flex: 0 1 auto;
+}
+
+.autopilot-policy-form small {
+  color: #94a3b8;
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.autopilot-notices-foot {
+  padding: 12px 18px;
+  margin: 0;
+}
+
+@media (max-width: 560px) {
+  .autopilot-notices-head {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .autopilot-policy-controls button {
+    width: 100%;
+  }
+
+  .autopilot-notice-detail {
+    margin-left: 0;
+  }
+}
+
 /* Diff Panel & Research Panel */
 .diff-panel, .research-panel {
   border: 1px solid var(--line);
