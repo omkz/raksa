@@ -64,25 +64,26 @@ The scan identified **5 potential findings** across Python and JavaScript codeba
 
 | Finding | Vulnerability | File | Action / Status | Outcome |
 | :--- | :--- | :--- | :--- | :--- |
-| **1** | SQL Injection (CWE-89) | `app/db.py` | `Patch Proposed` (`UNVERIFIED`) | Nemotron parameterized raw query formatting; validated & proposed. |
-| **2** | DOM XSS (CWE-79) | `client/render.js` | `Patch Proposed` (`UNVERIFIED`) | Nemotron replaced unsafe `innerHTML` with safe `textContent` sink. |
-| **3** | Path Traversal (CWE-22) | `app/storage.py` | `Needs Context` | Model abstained; requires human architectural policy for allowed root directory. |
-| **4** | Command Injection (CWE-78) | `app/tasks.py` | `Needs Review` | Model abstained; requires system allowlist or safe subprocess wrapper. |
-| **5** | Code Injection / Eval (CWE-94) | `client/calc.js` | `Needs Review` | Model abstained; dynamic expression evaluation requires architecture redesign. |
+| **1** | SQL Injection (CWE-89) | `app.py` | `Patch Proposed` (`UNVERIFIED`) | Nemotron parameterized raw query formatting; validated & proposed. |
+| **2** | DOM XSS (CWE-79) | `src/unsafe_xss.js` | `Patch Proposed` (`UNVERIFIED`) | Nemotron replaced unsafe `innerHTML` with safe `textContent` sink. |
+| **3** | Path Traversal (CWE-22) | `src/unsafe_path.py` | `Needs Context` | Model abstained; requires human architectural policy for allowed root directory. |
+| **4** | Command Injection (CWE-78) | `src/unsafe_shell.py` | `Needs Review` | Model abstained; requires system allowlist or safe subprocess wrapper. |
+| **5** | Code Injection / Eval (CWE-94) | `src/unsafe_eval.js` | `Needs Review` | Model abstained; dynamic expression evaluation requires architecture redesign. |
 
 ### Real Draft Pull Request
 
 The proposed remediations were reviewed and published via Raksa's GitHub App as a review-only Draft PR:
 👉 **[View Draft PR #5 on omkz/raksa-vulnerable-demo](https://github.com/omkz/raksa-vulnerable-demo/pull/5)**
 
-The Draft PR contains:
-- Transparent disclosure of the AI model and inference provider (NVIDIA Nemotron 3 Super 120B-A12B via Nebius Token Factory).
-- Explicit `UNVERIFIED` status disclosure noting that live repository tests were not executed and developer testing is required.
-- Individual remediation summaries and reproducible instructions.
+The Draft PR reflects actual safety-first automated output:
+- **Draft Status & Title:** Published as `[UNVERIFIED — REVIEW ONLY] security: review Raksa candidate fixes (omkz/raksa-vulnerable-demo)` by `raksa-security-agent[bot]`.
+- **Targeted Diff:** Modifies only `app.py` (parameterized query) and `src/unsafe_xss.js` (`textContent` replacement) with focused changes (+3, -3 lines).
+- **Mandatory Review Warning:** Includes a prominent `## UNVERIFIED — HUMAN REVIEW REQUIRED` advisory stating that no category-specific exploit or regression verification ran, and instructing that changes must not be merged without human review and testing.
+- **Candidate Scope Disclosure:** Explicitly notes that only selected CWE-89/CWE-79 candidate patches were included, while other findings were deliberately excluded.
 
 > [!IMPORTANT]
 > **Controlled Demonstration vs. Vulnerable Benchmark Repository:**
-> - Raksa includes an **in-memory SQLite proof harness** ("Run SQLi demo" on the dashboard or `/api/scans/demo/run`) that safely demonstrates differential exploit blocking and parameterized query verification without external credentials or executing untrusted code.
+> - Raksa includes an **in-memory SQLite proof harness** ("Run SQLi demo" on the dashboard or `POST /api/scans/demo/run`) that safely demonstrates differential exploit blocking and parameterized query verification without external LLM or GitHub credentials. Note that the demo endpoint still persists its completed scan job, findings, and audit log to the application's configured database.
 > - The demo repository (`omkz/raksa-vulnerable-demo`) is an intentionally vulnerable benchmark fixture for static scanning only. **Never execute or deploy `raksa-vulnerable-demo` on a production or unsandboxed host.**
 
 ---
@@ -118,8 +119,8 @@ Raksa maintains absolute honesty regarding what has been statically checked, wha
 
 - **Python:** 3.11 or newer with [uv](https://docs.astral.sh/uv/) (v0.3+)
 - **Node.js:** 20 or newer with [pnpm](https://pnpm.io/) (v9+)
-- **PostgreSQL:** (optional for full job queue; in-memory SQLite demo available)
-- **Docker:** (optional, for Docker sandbox provider or containerized OpenGrep)
+- **Database (PostgreSQL or SQLite):** PostgreSQL 16+ is configured by default (`DATABASE_URL=postgresql+asyncpg://raksa:raksa@localhost:5432/raksa`). You can spin up PostgreSQL via `docker compose up -d db`. For lightweight local development without PostgreSQL, configure SQLite (`DATABASE_URL=sqlite+aiosqlite:///raksa.db`).
+- **Docker:** (optional, for running the local PostgreSQL container, containerized OpenGrep, or Docker-based sandbox execution)
 
 ### 1. Clone & Configure Environment
 
@@ -138,6 +139,9 @@ SESSION_SECRET=replace-with-a-long-random-secret-at-least-32-chars
 FRONTEND_URL=http://localhost:5173
 CORS_ORIGINS=http://localhost:5173
 
+# Database (PostgreSQL required by default; lifespan auto-runs Alembic migrations on start)
+DATABASE_URL=postgresql+asyncpg://raksa:raksa@localhost:5432/raksa
+
 # Nebius Token Factory (NVIDIA Nemotron 3 Super 120B-A12B)
 NEBIUS_API_KEY=your-nebius-token-factory-key
 NEBIUS_BASE_URL=https://api.tokenfactory.nebius.com/v1
@@ -155,11 +159,22 @@ GITHUB_WEBHOOK_SECRET=your-webhook-secret
 SANDBOX_PROVIDER=demo
 ```
 
-### 2. Start the Backend API
+### 2. Start PostgreSQL & the Backend API
+
+If using the default PostgreSQL database, ensure PostgreSQL is running (e.g., via Docker Compose):
+
+```bash
+docker compose up -d db
+```
+
+Then start the FastAPI API server:
 
 ```bash
 uv run --directory apps/api uvicorn app.main:app --reload --port 8000
 ```
+
+> [!NOTE]
+> During startup, FastAPI's application lifespan automatically initializes the database schema (running Alembic migrations for PostgreSQL, or table creation for SQLite) and starts the embedded job worker. Even the local demo proof persists its completed scan job, findings, patches, and audit trail to this configured database.
 
 - API health endpoint: <http://localhost:8000/api/health>
 - Interactive OpenAPI docs: <http://localhost:8000/docs>
