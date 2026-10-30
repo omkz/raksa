@@ -902,9 +902,14 @@ export default function App() {
                       <strong>AI patch proposal diagnostics</strong>
                       <small>NOT VERIFICATION EVIDENCE</small>
                     </div>
-                    {scan.patch_messages.map((message) => (
-                      <p className="small-warning" key={message}>⚠ {message}</p>
-                    ))}
+                    {scan.patch_messages.map((message) => {
+                      const needsContext = message.includes('AI needs context:');
+                      return (
+                        <p className={needsContext ? 'panel-boundary-note' : 'small-warning'} key={message}>
+                          {needsContext ? 'ℹ' : '⚠'} {message}
+                        </p>
+                      );
+                    })}
                   </div>
                 )}
 
