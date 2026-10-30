@@ -263,12 +263,12 @@ async def create_pull_request(
             raise HTTPException(409, "Selected candidates produced no changes.")
         pr_title = "[UNVERIFIED — REVIEW ONLY] " + payload.title
         pr_body = (
-            "## UNVERIFIED — HUMAN REVIEW REQUIRED\\n\\n"
+            "## UNVERIFIED — HUMAN REVIEW REQUIRED\n\n"
             "This is a DRAFT PR containing limited AI-proposed code changes. "
             "No category-specific security exploit or regression verification "
-            "has been established for these changes. Do NOT merge without review and tests.\\n\\n"
+            "has been established for these changes. Do NOT merge without review and tests.\n\n"
             "Only selected CWE-89/CWE-79 candidates are included; other findings "
-            "and proposed fixes were deliberately excluded.\\n\\n"
+            "and proposed fixes were deliberately excluded.\n\n"
             + payload.body
         )
 
