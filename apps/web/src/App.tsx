@@ -99,6 +99,48 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+type ProposalNote = {
+  kind: 'context' | 'rejected' | 'info';
+  finding?: Finding;
+  title: string;
+  description: string;
+};
+
+function describeProposalNote(message: string, findings: Finding[] = []): ProposalNote {
+  const finding = findings.find((item) =>
+    message.startsWith(`${item.path}:`) || message.includes(` for ${item.path}:`));
+  const needsContext = message.includes('AI needs context:');
+  const rejected = message.includes('Patch rejected by context validation');
+
+  if (needsContext) {
+    const description = finding?.cwe === 'CWE-22'
+      ? 'Raksa could not identify the allowed file directory from repository context. It skipped this fix rather than guessing a security policy.'
+      : finding?.cwe === 'CWE-78'
+        ? 'Raksa needs the application\'s permitted commands before it can propose a reliable fix.'
+        : 'Raksa needs application-specific behavior or policy information before preparing a reliable patch.';
+    return { kind: 'context', finding, title: 'Additional context needed', description };
+  }
+  if (rejected) {
+    const descriptions: Record<string, string> = {
+      'CWE-22': 'A filename-only restriction does not establish a safe file-access boundary. Raksa excluded this patch.',
+      'CWE-78': 'The proposed change still allowed input to choose which command runs. Raksa excluded this patch.',
+      'CWE-94': 'The proposed change disabled the function instead of preserving its intended purpose. Raksa excluded this patch.',
+    };
+    return {
+      kind: 'rejected',
+      finding,
+      title: 'Unsafe candidate rejected',
+      description: descriptions[finding?.cwe || ''] || 'The candidate did not meet the patch acceptance checks and was excluded.',
+    };
+  }
+  return {
+    kind: 'info',
+    finding,
+    title: message.includes('AI abstained:') ? 'No reliable patch proposed' : 'Patch generation note',
+    description: 'Raksa continued investigating other findings. Open technical details for the original explanation.',
+  };
+}
+
 function Icon({ children }: { children: ReactNode }) {
   return <span className="icon" aria-hidden="true">{children}</span>;
 }
@@ -946,65 +988,80 @@ export default function App() {
                 )}
 
                 {scan.patch_messages && scan.patch_messages.length > 0 && (
-                  <div className="summary-box">
-                    <div className="summary-head">
-                      <strong>AI patch proposal diagnostics</strong>
-                      <small>NOT VERIFICATION EVIDENCE</small>
+                  <section className="autopilot-notices" aria-label="Autopilot review notes">
+                    <div className="autopilot-notices-head">
+                      <div>
+                        <strong>Autopilot review notes</strong>
+                        <p>Raksa finished the scan without waiting for answers. These findings were not resolved automatically.</p>
+                      </div>
+                      <span>{scan.patch_messages.length} TO REVIEW</span>
                     </div>
-                    {scan.patch_messages.map((message) => {
-                      const needsContext = message.includes('AI needs context:');
-                      const cwe22 = needsContext
-                        ? scan.findings?.find((item) =>
-                            item.cwe === 'CWE-22'
-                            && item.scanner === 'opengrep'
-                            && message.startsWith(`${item.path}:`)
-                            && !scan.patches?.some((patch) => patch.finding_id === item.id))
-                        : undefined;
+                    {scan.patch_messages.map((message, index) => {
+                      const note = describeProposalNote(message, scan.findings);
+                      const cwe22 = note.kind === 'context' && note.finding?.cwe === 'CWE-22'
+                        && note.finding.scanner === 'opengrep'
+                        && !scan.patches?.some((patch) => patch.finding_id === note.finding?.id)
+                        ? note.finding : undefined;
                       return (
-                        <div key={message}>
-                          <p className={needsContext ? 'panel-boundary-note' : 'small-warning'}>
-                            {needsContext ? 'ℹ' : '⚠'} {message}
-                          </p>
+                        <article className="autopilot-notice" key={`${index}-${message}`}>
+                          <div className="autopilot-notice-top">
+                            <span className={`autopilot-notice-mark ${note.kind}`} aria-hidden="true">
+                              {note.kind === 'rejected' ? '×' : 'i'}
+                            </span>
+                            <div>
+                              <strong>{note.title}</strong>
+                              {note.finding && (
+                                <span className="autopilot-notice-file">
+                                  {note.finding.cwe ? `${note.finding.cwe} · ` : ''}{note.finding.path}
+                                </span>
+                              )}
+                              <p>{note.description}</p>
+                            </div>
+                          </div>
                           {cwe22 && scan.full_name && scan.base_sha && (
-                            <form
-                              onSubmit={(event) => { event.preventDefault(); void previewCwe22Fix(cwe22); }}
-                              style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', margin: '12px 0' }}
-                            >
-                              <label htmlFor={`authorized-root-${cwe22.id}`} style={{ width: '100%' }}>
-                                Optional: folder aplikasi yang boleh dibaca (hanya jika kamu tahu)
-                              </label>
-                              <input
-                                id={`authorized-root-${cwe22.id}`}
-                                value={authorizedRoot}
-                                maxLength={256}
-                                onChange={(event) => setAuthorizedRoot(event.target.value)}
-                                placeholder="uploads/"
-                                required
-                                disabled={loading !== null}
-                                style={{ minWidth: '170px', flex: '1 1 180px' }}
-                              />
-                              <button
-                                type="submit"
-                                disabled={loading !== null || !authorizedRoot.trim()}
+                            <details className="autopilot-notice-detail">
+                              <summary>Provide file-access policy (optional)</summary>
+                              <form
+                                className="autopilot-policy-form"
+                                onSubmit={(event) => { event.preventDefault(); void previewCwe22Fix(cwe22); }}
                               >
-                                {loading === 'context' ? 'Asking Nemotron…' : 'Preview with my policy'}
-                              </button>
-                              <small style={{ width: '100%' }}>
-                                Opsional. Scan sudah selesai tanpa jawabanmu. Isi hanya untuk mencoba kandidat tambahan; ini bukan hasil verifikasi.
-                              </small>
-                            </form>
+                                <label htmlFor={`authorized-root-${cwe22.id}`}>
+                                  Which folder should this application be allowed to read?
+                                </label>
+                                <div className="autopilot-policy-controls">
+                                  <input
+                                    id={`authorized-root-${cwe22.id}`}
+                                    value={authorizedRoot}
+                                    maxLength={256}
+                                    onChange={(event) => setAuthorizedRoot(event.target.value)}
+                                    placeholder="e.g. uploads/"
+                                    required
+                                    disabled={loading !== null}
+                                  />
+                                  <button type="submit" disabled={loading !== null || !authorizedRoot.trim()}>
+                                    {loading === 'context' ? 'Generating preview…' : 'Preview suggested fix'}
+                                  </button>
+                                </div>
+                                <small>Only enter a folder if you know the application's intended policy. This preview does not change GitHub or verify the fix.</small>
+                              </form>
+                            </details>
                           )}
-                        </div>
+                          <details className="autopilot-notice-detail">
+                            <summary>Technical details</summary>
+                            <p className="autopilot-technical-message">{message}</p>
+                          </details>
+                        </article>
                       );
                     })}
-                  </div>
+                    <p className="autopilot-notices-foot">Review notes are not verification evidence. Unverified patches must be tested before merging.</p>
+                  </section>
                 )}
 
                 {contextPreview && (
                   <div className="summary-box">
                     <div className="summary-head">
-                      <strong>CWE-22 contextual remediation preview</strong>
-                      <small>UNVERIFIED · NO PR CREATION</small>
+                      <strong>Optional Path Traversal patch preview</strong>
+                      <small>UNVERIFIED · PREVIEW ONLY</small>
                     </div>
                     <p>
                       {contextPreview.path} · developer-authorized root:
