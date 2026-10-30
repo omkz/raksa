@@ -960,11 +960,11 @@ export default function App() {
                               onSubmit={(event) => { event.preventDefault(); void previewCwe22Fix(cwe22); }}
                               style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', margin: '12px 0' }}
                             >
-                              <label htmlFor="authorized-root" style={{ width: '100%' }}>
+                              <label htmlFor={`authorized-root-${cwe22.id}`} style={{ width: '100%' }}>
                                 Authorized directory (relative to application/project root)
                               </label>
                               <input
-                                id="authorized-root"
+                                id={`authorized-root-${cwe22.id}`}
                                 value={authorizedRoot}
                                 maxLength={256}
                                 onChange={(event) => setAuthorizedRoot(event.target.value)}
