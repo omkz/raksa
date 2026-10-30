@@ -137,6 +137,27 @@ function verificationCheckPresentation(check: { status?: string; passed?: boolea
   return check.passed === true ? { label: '✓ PASSED', tone: 'good-text' } : { label: '— NOT REPORTED', tone: '' };
 }
 
+function verificationStatusPresentation(status: string, scanStatus?: string): { label: string; tone: string } {
+  if (scanStatus === 'failed') {
+    return { label: 'FAILED', tone: 'bad' };
+  }
+  switch (status) {
+    case 'verified':
+      return { label: 'VERIFIED', tone: 'good' };
+    case 'failed':
+      return { label: 'FAILED', tone: 'bad' };
+    case 'error':
+      return { label: 'ERROR', tone: 'bad' };
+    case 'unverified':
+      return { label: 'UNVERIFIED', tone: 'pending' };
+    case 'not_run':
+    case 'not-run':
+      return { label: 'NOT RUN', tone: 'pending' };
+    default:
+      return { label: status.replaceAll('_', ' ').toUpperCase(), tone: 'pending' };
+  }
+}
+
 function buildProposalNotes(scan: Scan): ProposalNote[] {
   const findings = scan.findings || [];
   const outcomes = scan.verification?.finding_outcomes || {};
@@ -144,7 +165,9 @@ function buildProposalNotes(scan: Scan): ProposalNote[] {
     id: finding.id,
     finding,
     outcome: outcomes[finding.id],
-    patch: scan.patches?.find((patch) => patch.finding_id === finding.id),
+    patch: scan.patches?.find((patch) =>
+      patch.finding_id === finding.id || (!patch.finding_id && (scan.patches?.length === 1 || patch.path === finding.path))
+    ),
     messages: [],
     policyRequested: false,
   }));
@@ -167,7 +190,7 @@ function buildProposalNotes(scan: Scan): ProposalNote[] {
       && note.messages.some((message) => message.startsWith(`${note.finding?.path}: AI needs context:`))
     );
   }
-  return [...notes.filter((note) => note.outcome || note.patch || note.messages.length), ...unassigned];
+  return [...notes, ...unassigned];
 }
 
 function Icon({ children }: { children: ReactNode }) {
@@ -340,9 +363,9 @@ export default function App() {
       const result = await api<{ url: string }>('/api/scans/' + scan.id + '/pull-request', {
         method: 'POST',
         body: JSON.stringify({
-          review_only: !verified,
+          review_only: !eligibleForPr,
           title: `security: review Raksa candidate fixes (${scan.full_name})`,
-          body: `## Summary\nPrepared by Raksa for review.\n\n## ${verified ? 'Verification evidence' : 'UNVERIFIED review candidate'}\n${scan.verification?.message || 'See attached scan evidence.'}\n\nPlease review the diff and test results carefully before merging.`,
+          body: `## Summary\nPrepared by Raksa for review.\n\n## ${eligibleForPr ? 'Verification evidence' : 'UNVERIFIED review candidate'}\n${scan.verification?.message || 'See attached scan evidence.'}\n\nPlease review the diff and test results carefully before merging.`,
         }),
       });
       setPrUrl(result.url);
@@ -355,15 +378,17 @@ export default function App() {
   };
 
   const proposalNotes = scan ? buildProposalNotes(scan) : [];
-  const diagnosticNotes = proposalNotes.filter((note) => note.messages.length > 0 || note.policyRequested);
+  const diagnosticNotes = proposalNotes.filter((note) => note.messages.length > 0 || note.policyRequested || !note.patch);
   const existingPrUrl = prUrl || scan?.pull_request_url;
   const findingCount = scan?.findings?.length || 0;
   const patchCount = scan?.patches?.length || 0;
-  const verificationStatus = String(scan?.verification?.status || 'not-run');
-  const verified = Boolean(scan?.verification?.eligible_for_pr);
+  const verificationStatus = String(scan?.verification?.status || 'not_run');
+  const isVerificationPassed = verificationStatus === 'verified';
+  const isVerificationFailed = verificationStatus === 'failed' || verificationStatus === 'error';
+  const eligibleForPr = Boolean(scan?.verification?.eligible_for_pr);
   const reviewPrCount = Array.isArray(scan?.verification?.review_pr_finding_ids)
     ? scan.verification.review_pr_finding_ids.length : 0;
-  const canCreatePr = verified || reviewPrCount > 0;
+  const canCreatePr = eligibleForPr || reviewPrCount > 0;
   const integrationCount = useMemo(() => Object.values(health?.integrations || {}).filter(Boolean).length, [health]);
 
   if (checkingAuth) {
@@ -784,15 +809,17 @@ export default function App() {
           </div>
         )}
 
-        {scan && (
+        {scan && (() => {
+          const statusBadge = verificationStatusPresentation(verificationStatus, scan.status);
+          return (
           <section className="results-section" aria-labelledby="results-heading">
             <div className="section-heading results-heading">
               <div>
                 <span className="section-index">02</span>
                 <h2 id="results-heading">Investigation results</h2>
               </div>
-              <span className={`result-status ${scan.status === 'failed' ? 'bad' : verified || verificationStatus === 'verified' ? 'good' : 'pending'}`}>
-                <i aria-hidden="true" /> {scan.status === 'failed' ? 'FAILED' : verificationStatus.replaceAll('_', ' ').toUpperCase()}
+              <span className={`result-status ${statusBadge.tone}`}>
+                <i aria-hidden="true" /> {statusBadge.label}
               </span>
             </div>
 
@@ -819,10 +846,18 @@ export default function App() {
                   </div>
                   <div className="metric-card">
                     <span>VERIFICATION</span>
-                    <strong className={verified || verificationStatus === 'verified' ? 'green-number' : ''}>
-                      {verified || verificationStatus === 'verified' ? '✓' : '—'}
+                    <strong className={isVerificationPassed ? 'green-number' : isVerificationFailed ? 'bad-text' : ''}>
+                      {isVerificationPassed ? '✓' : isVerificationFailed ? '✕' : '—'}
                     </strong>
-                    <small>{verified ? 'Evidence verified' : 'Not fully verified'}</small>
+                    <small>
+                      {isVerificationPassed
+                        ? 'Evidence verified'
+                        : isVerificationFailed
+                          ? (verificationStatus === 'failed' ? 'Verification failed' : 'Verification error')
+                          : verificationStatus === 'unverified'
+                            ? 'Not fully verified'
+                            : 'Not run'}
+                    </small>
                   </div>
                   <div className="metric-card">
                     <span>REPOSITORY</span>
@@ -851,10 +886,16 @@ export default function App() {
                 {scan.findings?.map((finding) => {
                   const note = proposalNotes.find((item) => item.finding?.id === finding.id);
                   const presentation = outcomePresentation(note?.outcome?.status);
-                  const patchIndex = scan.patches?.findIndex((patch) => patch.finding_id === finding.id) ?? -1;
-                  const remediationLink = diagnosticNotes.some((item) => item.finding?.id === finding.id)
-                    ? `#remediation-note-${encodeURIComponent(finding.id)}`
-                    : patchIndex >= 0 ? `#patch-${patchIndex}` : '#remediation';
+                  const patchIndex = scan.patches?.findIndex((patch) =>
+                    patch.finding_id === finding.id || (!patch.finding_id && (scan.findings?.length === 1 || patch.path === finding.path))
+                  ) ?? -1;
+                  const hasPatch = patchIndex >= 0;
+                  const hasDiagnostics = diagnosticNotes.some((item) => item.finding?.id === finding.id);
+                  const remediationLink = hasPatch
+                    ? `#patch-${patchIndex}`
+                    : hasDiagnostics
+                      ? `#remediation-note-${encodeURIComponent(finding.id)}`
+                      : '#remediation';
                   return (
                   <article className="finding-card" id={`finding-${encodeURIComponent(finding.id)}`} key={finding.id}>
                     <div className="finding-top">
@@ -881,6 +922,9 @@ export default function App() {
                           <code>ID: {finding.id}</code>
                           {finding.rule_id && <code>Rule: {finding.rule_id}</code>}
                           <a href={remediationLink}>Review remediation <span aria-hidden="true">↓</span></a>
+                          {hasPatch && hasDiagnostics && (
+                            <a href={`#remediation-note-${encodeURIComponent(finding.id)}`}>Diagnostic history <span aria-hidden="true">↓</span></a>
+                          )}
                         </div>
                       </div>
                       <div className="finding-detection">
@@ -946,14 +990,20 @@ export default function App() {
                         </div>
                       ))}
                     </pre>}
-                    {scan.patches?.map((patch, index) => (
+                    {scan.patches?.map((patch, index) => {
+                      const patchFindingId = patch.finding_id || (scan.findings?.length === 1 ? scan.findings[0]?.id : undefined);
+                      const hasDiagnosticHistory = patchFindingId ? diagnosticNotes.some((item) => item.finding?.id === patchFindingId) : false;
+                      return (
                       <div className="patch-reason" id={`patch-${index}`} key={`${patch.path}-${index}`}>
                         <span>CANDIDATE RATIONALE · {patch.cwe || 'APPSEC'}</span>
                         <div className="patch-reference">
                           <code>{patch.path}</code>
-                          {patch.finding_id && (scan.findings?.some((finding) => finding.id === patch.finding_id)
-                            ? <a href={`#finding-${encodeURIComponent(patch.finding_id)}`}>Finding {patch.finding_id} ↑</a>
-                            : <code>Finding ID: {patch.finding_id}</code>)}
+                          {patchFindingId && (scan.findings?.some((finding) => finding.id === patchFindingId)
+                            ? <a href={`#finding-${encodeURIComponent(patchFindingId)}`}>Finding {patchFindingId} ↑</a>
+                            : <code>Finding ID: {patchFindingId}</code>)}
+                          {hasDiagnosticHistory && (
+                            <a href={`#remediation-note-${encodeURIComponent(patchFindingId!)}`}>Diagnostic history ↓</a>
+                          )}
                         </div>
                         <p>{patch.reason}</p>
                         {!scan.diff && (
@@ -965,7 +1015,8 @@ export default function App() {
                         )}
                         <small>{patch.scanner || 'AI'} · PROPOSAL — NOT AUTOMATICALLY VERIFIED</small>
                       </div>
-                    ))}
+                    );
+                    })}
                   </div>
                 )}
 
@@ -978,12 +1029,16 @@ export default function App() {
                         <h3 id="autopilot-notes-title">Remediation context & history</h3>
                         <p>Policy previews and original model diagnostics. Retry history does not change the final finding outcome.</p>
                       </div>
-                      <span className="autopilot-notes-count">{scan.patch_messages?.length || 0} DIAGNOSTICS</span>
+                      <span className="autopilot-notes-count">{diagnosticNotes.length} {diagnosticNotes.length === 1 ? 'NOTE' : 'NOTES'}</span>
                     </div>
                     {diagnosticNotes.map((note) => {
                       const cwe22 = note.policyRequested && note.finding?.cwe === 'CWE-22'
                         && note.finding.scanner === 'opengrep' && !note.patch
                         && scan.status === 'completed' ? note.finding : undefined;
+                      const patchIndex = note.finding
+                        ? scan.patches?.findIndex((p) => p.finding_id === note.finding?.id || (!p.finding_id && (scan.findings?.length === 1 || p.path === note.finding?.path))) ?? -1
+                        : -1;
+                      const presentation = outcomePresentation(note.outcome?.status);
                       return (
                         <div className="autopilot-notice" id={note.finding ? `remediation-note-${encodeURIComponent(note.finding.id)}` : undefined} key={note.id}>
                           <div className="remediation-reference">
@@ -991,9 +1046,18 @@ export default function App() {
                               <span className="autopilot-cwe">{note.finding.cwe || 'APPSEC'}</span>
                               <code>{note.finding.path}:{note.finding.line}</code>
                               <a href={`#finding-${encodeURIComponent(note.finding.id)}`}>Finding {note.finding.id} ↑</a>
+                              {patchIndex >= 0 && (
+                                <a href={`#patch-${patchIndex}`}>Patch candidate ↓</a>
+                              )}
                             </> : <strong>Unassigned diagnostic</strong>}
                           </div>
-                          {note.policyRequested && <p className="autopilot-outcome-message">Policy context requested. The remediation status remains {outcomePresentation(note.outcome?.status).label}.</p>}
+                          {note.policyRequested ? (
+                            <p className="autopilot-outcome-message">Policy context requested. The remediation status remains {presentation.label}.</p>
+                          ) : note.outcome ? (
+                            <p className="autopilot-outcome-message">
+                              <strong className={`autopilot-status-inline ${presentation.tone}`}>{presentation.label}:</strong> {note.outcome.message}
+                            </p>
+                          ) : null}
                           {!note.outcome && note.messages.length > 0 && <p className="autopilot-technical-message">{note.messages[note.messages.length - 1]}</p>}
                           {note.messages.length > 0 && (
                             <details className="diagnostic-history">
@@ -1090,19 +1154,21 @@ export default function App() {
                 <section className="results-area" id="verification" aria-labelledby="verification-heading">
                   <div className="results-area-heading"><span>03</span><div><h3 id="verification-heading">Verification &amp; Pull Request</h3><p>Executed checks and publication eligibility. Draft PR creation always requires an explicit action.</p></div></div>
                 {scan.verification && (
-                  <div className="verification-panel">
+                  <div className={`verification-panel ${isVerificationPassed ? 'verified good' : isVerificationFailed ? 'failed bad' : 'unverified'}`}>
                     <div className="verification-icon" aria-hidden="true">
-                      {verificationStatus === 'verified' ? '✓' : '◷'}
+                      {isVerificationPassed ? '✓' : isVerificationFailed ? '✕' : '◷'}
                     </div>
                     <div className="verification-copy">
                       <strong>
-                        {verificationStatus === 'verified'
+                        {isVerificationPassed
                           ? scan.verification.regression_tests?.status === 'skipped'
                             ? 'Verification gate passed (regression tests skipped)'
                             : scan.verification.regression_tests?.status === 'unavailable'
                             ? 'Security verified (regression coverage unavailable)'
                             : 'Verification gate passed'
-                          : 'Verification not completed'}
+                          : isVerificationFailed
+                            ? (verificationStatus === 'failed' ? 'Verification gate failed' : 'Verification execution error')
+                            : 'Remediation unverified'}
                       </strong>
                       <p>{String(scan.verification.message || scan.verification.evidence || 'No verification details available.')}</p>
 
@@ -1125,6 +1191,12 @@ export default function App() {
                             );
                           })}
                         </div>
+                      )}
+
+                      {!isVerificationPassed && !isVerificationFailed && (
+                        <p className="verification-boundary-note">
+                          Passing an individual check (such as static recheck or unrelated tests) does not constitute full verification. Differential exploit reproduction and regression testing are required to prove remediation.
+                        </p>
                       )}
 
                       {scan.verification.before && scan.verification.after && (
@@ -1183,14 +1255,14 @@ export default function App() {
                   <div className="action-footer">
                     <div>
                       <strong>
-                        {verified
+                        {eligibleForPr
                           ? scan.verification?.regression_tests?.status === 'unavailable'
                             ? 'Ready for human review (regression unverified)'
                             : 'Ready for human review'
                           : reviewPrCount > 0 ? 'Review-only Draft PR available' : 'No eligible review-only patches'}
                       </strong>
                       <p>
-                        {verified
+                        {eligibleForPr
                           ? scan.verification?.regression_tests?.status === 'unavailable'
                             ? 'Security verified. A draft PR is ready for human review without automated regression coverage.'
                             : 'A verified patch is ready to publish as a draft PR.'
@@ -1205,18 +1277,23 @@ export default function App() {
                       onClick={createPr}
                       disabled={!canCreatePr || loading !== null}
                     >
-                      {loading === 'pr' ? 'Creating draft PR…' : verified ? 'Create verified draft PR' : 'Create UNVERIFIED review draft'}
+                      {loading === 'pr' ? 'Creating draft PR…' : eligibleForPr ? 'Create verified draft PR' : 'Create UNVERIFIED review draft'}
                       <span aria-hidden="true">↗</span>
                     </button>
                   </div>
                 ) : (
-                  <p className="results-empty">Draft PR creation is unavailable for this scan. An eligible candidate and explicit approval are required.</p>
+                  <p className="results-empty">
+                    {scan.full_name
+                      ? 'Draft PR creation is unavailable for this scan. An eligible candidate and explicit approval are required.'
+                      : 'Draft PR creation is unavailable for in-memory walkthroughs. Connect a GitHub repository to publish review PRs.'}
+                  </p>
                 )}
                 </section>
               </>
             )}
           </section>
-        )}
+        );
+        })()}
 
         <footer className="footer">
           <span>RAKSA © 2026</span>

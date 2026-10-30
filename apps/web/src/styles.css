@@ -1895,6 +1895,62 @@ h1 em {
   margin: 6px 0 0;
 }
 
+.verification-panel.unverified {
+  border-color: var(--amber-border);
+  background: rgba(246, 190, 115, 0.04);
+}
+
+.verification-panel.unverified .verification-icon {
+  background: var(--amber-subtle);
+  color: var(--amber);
+  border-color: var(--amber-border);
+}
+
+.verification-panel.unverified .verification-copy > p {
+  color: #fde68a;
+}
+
+.verification-panel.failed,
+.verification-panel.bad {
+  border-color: var(--red-border);
+  background: rgba(248, 113, 113, 0.05);
+}
+
+.verification-panel.failed .verification-icon,
+.verification-panel.bad .verification-icon {
+  background: var(--red-subtle);
+  color: var(--red);
+  border-color: var(--red-border);
+}
+
+.verification-panel.failed .verification-copy > p,
+.verification-panel.bad .verification-copy > p {
+  color: #fca5a5;
+}
+
+.verification-boundary-note {
+  margin-top: 14px;
+  padding: 10px 14px;
+  border-radius: 6px;
+  background: rgba(5, 12, 18, 0.5);
+  border-left: 2px solid var(--amber);
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.autopilot-status-inline {
+  font-weight: 600;
+}
+
+.autopilot-status-inline.proposed { color: #a5c8ff; }
+.autopilot-status-inline.verified { color: var(--green); }
+.autopilot-status-inline.rejected { color: #fca5a5; }
+.autopilot-status-inline.blocked { color: #fca5a5; }
+.autopilot-status-inline.context { color: var(--amber); }
+.autopilot-status-inline.review { color: var(--amber); }
+.autopilot-status-inline.neutral { color: var(--text-muted); }
+
 .proof-results {
   display: grid;
   grid-template-columns: 1fr 1fr;
