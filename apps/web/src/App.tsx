@@ -129,7 +129,7 @@ function describeProposalNote(message: string, findings: Finding[] = []): Propos
     return {
       kind: 'rejected',
       finding,
-      title: 'Unsafe candidate rejected',
+      title: 'Patch candidate rejected',
       description: descriptions[finding?.cwe || ''] || 'The candidate did not meet the patch acceptance checks and was excluded.',
     };
   }
@@ -992,9 +992,9 @@ export default function App() {
                     <div className="autopilot-notices-head">
                       <div>
                         <strong>Autopilot review notes</strong>
-                        <p>Raksa finished the scan without waiting for answers. These findings were not resolved automatically.</p>
+                        <p>Raksa finished the scan without interruptions. You can review these unresolved items later.</p>
                       </div>
-                      <span>{scan.patch_messages.length} TO REVIEW</span>
+                      <span>{scan.patch_messages.length} NOTES</span>
                     </div>
                     {scan.patch_messages.map((message, index) => {
                       const note = describeProposalNote(message, scan.findings);
