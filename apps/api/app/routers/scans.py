@@ -10,7 +10,6 @@ from app.services.analyzer import apply_exact_replacements
 from app.services.auth import user_has_workspace_access
 from app.services.demo_proof import FIXED_SNIPPET, VULNERABLE_SNIPPET, run_demo_proof
 from app.services.github_app import GitHubAppError, github_app
-from app.services.nebius import NebiusUnavailable, nebius
 from app.services.job_store import (
     create_scan_job,
     get_job,
@@ -19,6 +18,7 @@ from app.services.job_store import (
     record_audit_event,
     update_job,
 )
+from app.services.nebius import NebiusUnavailable, nebius
 from app.services.workflow import new_scan_id, public_job
 
 router = APIRouter(prefix="/api/scans", tags=["scans"])
