@@ -220,23 +220,66 @@ async def create_pull_request(
 
     if job.get("status") != "completed":
         raise HTTPException(409, "Wait for the scan to complete before creating a pull request.")
-    if not (job.get("verification") or {}).get("eligible_for_pr"):
-        raise HTTPException(409, "PR creation is disabled because the proposed fix has not passed required verification.")
+    verification = job.get("verification") or {}
+    verified = bool(verification.get("eligible_for_pr"))
+    if not verified and not payload.review_only:
+        raise HTTPException(409, "Explicit review-only approval is required for unverified patches.")
+    if not verified and not verification.get("review_pr_finding_ids"):
+        raise HTTPException(409, "No eligible review-only candidates. Re-scan with the current Raksa version.")
 
     installation_id = auth.workspace.get("installation_id") or request.session.get("installation_id")
     if not installation_id or str(installation_id) != str(job.get("installation_id")):
         raise HTTPException(401, "Reconnect the same GitHub installation used for this scan.")
     if not job.get("changed_files") or not job.get("base_sha"):
-        raise HTTPException(409, "This scan has no verified code changes to publish.")
+        raise HTTPException(409, "This scan has no candidate code changes to publish.")
+
+    pr_files = dict(job["changed_files"])
+    pr_title = payload.title
+    pr_body = payload.body
+    if not verified:
+        # Reconstruct only approved review candidates from original source;
+        # never publish the scan's aggregate diff with excluded patches.
+        from app.services.workflow import reviewable_patch
+
+        allowed_ids = set(verification["review_pr_finding_ids"])
+        selected = [
+            patch for patch in (job.get("patches") or [])
+            if patch.get("finding_id") in allowed_ids and reviewable_patch(patch)
+        ]
+        if not selected:
+            raise HTTPException(409, "No eligible review-only patches remain.")
+        original = job.get("source_files") or {}
+        if not original or any(patch.get("path") not in original for patch in selected):
+            raise HTTPException(409, "Original scan source is unavailable; run a new scan.")
+        try:
+            selected_patched = apply_exact_replacements(dict(original), selected)
+        except ValueError as exc:
+            raise HTTPException(409, "Review candidate no longer matches scanned source.") from exc
+        pr_files = {
+            path: content for path, content in selected_patched.items()
+            if path in original and content != original[path]
+        }
+        if not pr_files:
+            raise HTTPException(409, "Selected candidates produced no changes.")
+        pr_title = "[UNVERIFIED — REVIEW ONLY] " + payload.title
+        pr_body = (
+            "## UNVERIFIED — HUMAN REVIEW REQUIRED\\n\\n"
+            "This is a DRAFT PR containing limited AI-proposed code changes. "
+            "No category-specific security exploit or regression verification "
+            "has been established for these changes. Do NOT merge without review and tests.\\n\\n"
+            "Only selected CWE-89/CWE-79 candidates are included; other findings "
+            "and proposed fixes were deliberately excluded.\\n\\n"
+            + payload.body
+        )
 
     try:
         pr = await github_app.create_pull_request(
             str(installation_id),
             str(job["full_name"]),
             expected_base_sha=str(job["base_sha"]),
-            files=dict(job["changed_files"]),
-            title=payload.title,
-            body=payload.body,
+            files=pr_files,
+            title=pr_title,
+            body=pr_body,
             scan_id=scan_id,
         )
     except GitHubAppError as exc:
