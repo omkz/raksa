@@ -61,6 +61,20 @@ scanner error, not an assertion that the repository is safe.
   change dangerous behavior, but must disclose the change; it cannot invent an
   authorized directory or allowed command policy. These checks do **not**
   establish behavioral equivalence, runtime correctness, or exploit mitigation.
+- For an OpenGrep **CWE-22** finding whose model outcome is
+  `needs_context`, the completed scan UI accepts a developer-approved relative
+  application directory, such as `uploads/`. The new authenticated
+  `POST /api/scans/{scan_id}/context-remediation` endpoint uses the original
+  scan's pinned Git commit and matching GitHub installation, validates the
+  directory string, and sends the approved policy to Nemotron. Its response is
+  an **isolated candidate preview**, not an update to the original scan,
+  a file write, or a draft PR. The prompt requires absolute paths, `..`,
+  and symlinks escaping the authorized root to be rejected, and requests
+  canonical path containment. The model output still undergoes literal-context
+  and Python syntax/import validation. That does NOT prove real filesystem
+  confinement or eliminate symlink TOCTOU races. Only category-specific
+  security and regression tests can establish remediation evidence. The
+  preview always reports **UNVERIFIED** and `eligible_for_pr=false`.
 - These proposals are **not verified** by the current SQLi-only gate. Any
   scan with an accepted OpenGrep patch is **unverified** and **ineligible for
   draft PR creation**, even when a SQLi patch is also present.
