@@ -83,7 +83,9 @@ export function associateFindingsAndPatches<F extends FindingRef, P extends Patc
   if (unassignedFindings.length === 1 && unassignedLegacyPatches.length === 1) {
     const { patch, index: patchIndex } = unassignedLegacyPatches[0];
     const finding = unassignedFindings[0];
-    if (!patch.path || !finding.path || patch.path === finding.path) {
+    const patchPath = patch.path?.trim();
+    const findingPath = finding.path?.trim();
+    if (patchPath && findingPath && patchPath === findingPath) {
       findingToPatch.set(finding.id, patch);
       findingToPatchIndex.set(finding.id, patchIndex);
       patchToFindingId.set(patchIndex, finding.id);
@@ -93,15 +95,16 @@ export function associateFindingsAndPatches<F extends FindingRef, P extends Patc
   } else if (unassignedFindings.length > 1 && unassignedLegacyPatches.length > 0) {
     // Case 2B: Multiple unassigned findings.
     // Match only if within a given file path there is EXACTLY 1 unassigned finding
-    // and EXACTLY 1 unassigned legacy patch.
+    // and EXACTLY 1 unassigned legacy patch, requiring non-empty matching paths.
     for (const { patch, index: patchIndex } of unassignedLegacyPatches) {
-      if (assignedPatchIndices.has(patchIndex) || !patch.path) continue;
+      const patchPath = patch.path?.trim();
+      if (assignedPatchIndices.has(patchIndex) || !patchPath) continue;
 
       const candidates = unassignedFindings.filter(
-        (f) => !assignedFindingIds.has(f.id) && f.path === patch.path
+        (f) => !assignedFindingIds.has(f.id) && f.path?.trim() === patchPath
       );
       const patchesInSamePath = unassignedLegacyPatches.filter(
-        (p) => !assignedPatchIndices.has(p.index) && p.patch.path === patch.path
+        (p) => !assignedPatchIndices.has(p.index) && p.patch.path?.trim() === patchPath
       );
 
       if (candidates.length === 1 && patchesInSamePath.length === 1) {

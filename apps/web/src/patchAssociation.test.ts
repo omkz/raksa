@@ -177,3 +177,72 @@ test('10. Empty or undefined inputs return empty maps safely', () => {
   assert.strictEqual(result2.findingToPatchIndex.size, 0);
   assert.strictEqual(result2.patchToFindingId.size, 0);
 });
+
+test('11. Legacy fallback rejects association if patch path is empty or whitespace', () => {
+  const findings: FindingRef[] = [
+    { id: 'f1', path: 'app.py' },
+  ];
+  const patchesEmpty: PatchRef[] = [
+    { path: '', reason: 'Empty path patch' },
+  ];
+  const resultEmpty = associateFindingsAndPatches(findings, patchesEmpty);
+  assert.strictEqual(resultEmpty.findingToPatch.has('f1'), false);
+  assert.strictEqual(resultEmpty.patchToFindingId.has(0), false);
+
+  const patchesWhitespace: PatchRef[] = [
+    { path: '   ', reason: 'Whitespace path patch' },
+  ];
+  const resultWhitespace = associateFindingsAndPatches(findings, patchesWhitespace);
+  assert.strictEqual(resultWhitespace.findingToPatch.has('f1'), false);
+  assert.strictEqual(resultWhitespace.patchToFindingId.has(0), false);
+});
+
+test('12. Legacy fallback rejects association if finding path is empty or whitespace', () => {
+  const findings: FindingRef[] = [
+    { id: 'f1', path: '' },
+  ];
+  const patches: PatchRef[] = [
+    { path: 'app.py', reason: 'Patch with path' },
+  ];
+  const result = associateFindingsAndPatches(findings, patches);
+  assert.strictEqual(result.findingToPatch.has('f1'), false);
+  assert.strictEqual(result.patchToFindingId.has(0), false);
+});
+
+test('13. Legacy fallback rejects association if both paths are empty', () => {
+  const findings: FindingRef[] = [
+    { id: 'f1', path: '' },
+  ];
+  const patches: PatchRef[] = [
+    { path: '', reason: 'Both empty' },
+  ];
+  const result = associateFindingsAndPatches(findings, patches);
+  assert.strictEqual(result.findingToPatch.has('f1'), false);
+  assert.strictEqual(result.patchToFindingId.has(0), false);
+});
+
+test('14. Legacy fallback rejects association if paths mismatch', () => {
+  const findings: FindingRef[] = [
+    { id: 'f1', path: 'server.py' },
+  ];
+  const patches: PatchRef[] = [
+    { path: 'client.py', reason: 'Mismatch' },
+  ];
+  const result = associateFindingsAndPatches(findings, patches);
+  assert.strictEqual(result.findingToPatch.has('f1'), false);
+  assert.strictEqual(result.patchToFindingId.has(0), false);
+});
+
+test('15. Legacy fallback succeeds when both paths are non-empty and exactly equal', () => {
+  const findings: FindingRef[] = [
+    { id: 'f1', path: 'src/services/auth.py' },
+  ];
+  const patches: PatchRef[] = [
+    { path: 'src/services/auth.py', reason: 'Valid exact path match' },
+  ];
+  const result = associateFindingsAndPatches(findings, patches);
+  assert.strictEqual(result.findingToPatch.get('f1')?.reason, 'Valid exact path match');
+  assert.strictEqual(result.findingToPatchIndex.get('f1'), 0);
+  assert.strictEqual(result.patchToFindingId.get(0), 'f1');
+});
+
