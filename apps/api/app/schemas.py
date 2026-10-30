@@ -117,5 +117,6 @@ class ScanResult(BaseModel):
 
 
 class CreatePRRequest(BaseModel):
+    review_only: bool = False
     title: str = Field(default="Raksa security remediation", min_length=5, max_length=200)
     body: str = Field(default="This pull request was prepared by Raksa. Please review the code and test evidence carefully.", max_length=8000)
