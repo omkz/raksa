@@ -24,6 +24,8 @@ type Finding = {
 };
 
 type Patch = { path: string; old_text: string; new_text: string; reason: string; scanner?: string; cwe?: string; finding_id?: string };
+type FindingOutcome = { status: string; message: string };
+
 type Scan = {
   id: string;
   status: 'queued' | 'running' | 'completed' | 'failed';
@@ -37,7 +39,7 @@ type Scan = {
   diff?: string | null;
   summary?: string | null;
   research?: { title: string; url: string; content: string }[];
-  verification?: Record<string, any> & { finding_outcomes?: Record<string, { status: string; message: string }> };
+  verification?: Record<string, any> & { finding_outcomes?: Record<string, FindingOutcome> };
   pull_request_url?: string | null;
   error?: string | null;
   patch_messages?: string[];
@@ -100,45 +102,60 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 type ProposalNote = {
-  kind: 'context' | 'rejected' | 'info';
+  id: string;
   finding?: Finding;
-  title: string;
-  description: string;
+  outcome?: FindingOutcome;
+  patch?: Patch;
+  messages: string[];
+  policyRequested: boolean;
 };
 
-function describeProposalNote(message: string, findings: Finding[] = []): ProposalNote {
-  const finding = findings.find((item) =>
-    message.startsWith(`${item.path}:`) || message.includes(` for ${item.path}:`));
-  const needsContext = message.includes('AI needs context:');
-  const rejected = message.includes('Patch rejected by context validation');
-
-  if (needsContext) {
-    const description = finding?.cwe === 'CWE-22'
-      ? 'Raksa could not identify the allowed file directory from repository context. It skipped this fix rather than guessing a security policy.'
-      : finding?.cwe === 'CWE-78'
-        ? 'Raksa needs the application\'s permitted commands before it can propose a reliable fix.'
-        : 'Raksa needs application-specific behavior or policy information before preparing a reliable patch.';
-    return { kind: 'context', finding, title: 'Additional context needed', description };
-  }
-  if (rejected) {
-    const descriptions: Record<string, string> = {
-      'CWE-22': 'A filename-only restriction does not establish a safe file-access boundary. Raksa excluded this patch.',
-      'CWE-78': 'The proposed change still allowed input to choose which command runs. Raksa excluded this patch.',
-      'CWE-94': 'The proposed change disabled the function instead of preserving its intended purpose. Raksa excluded this patch.',
-    };
-    return {
-      kind: 'rejected',
-      finding,
-      title: 'Patch candidate rejected',
-      description: descriptions[finding?.cwe || ''] || 'The candidate did not meet the patch acceptance checks and was excluded.',
-    };
-  }
-  return {
-    kind: 'info',
-    finding,
-    title: message.includes('AI abstained:') ? 'No reliable patch proposed' : 'Patch generation note',
-    description: 'Raksa continued investigating other findings. Open technical details for the original explanation.',
+function outcomePresentation(status?: string): { label: string; tone: string } {
+  const statuses: Record<string, { label: string; tone: string }> = {
+    patch_proposed: { label: 'Patch Proposed', tone: 'proposed' },
+    rejected: { label: 'Rejected', tone: 'rejected' },
+    needs_context: { label: 'Needs Context', tone: 'context' },
+    needs_review: { label: 'Needs Review', tone: 'review' },
+    blocked: { label: 'Blocked', tone: 'blocked' },
+    not_attempted: { label: 'Not Attempted', tone: 'neutral' },
+    verified: { label: 'Verified', tone: 'verified' },
   };
+  return status && Object.hasOwn(statuses, status) ? statuses[status] : {
+    label: status ? `Unknown Status (${status})` : 'Diagnostics Only', tone: 'neutral',
+  };
+}
+
+function buildProposalNotes(scan: Scan): ProposalNote[] {
+  const findings = scan.findings || [];
+  const outcomes = scan.verification?.finding_outcomes || {};
+  const notes = findings.map((finding): ProposalNote => ({
+    id: finding.id,
+    finding,
+    outcome: outcomes[finding.id],
+    patch: scan.patches?.find((patch) => patch.finding_id === finding.id),
+    messages: [],
+    policyRequested: false,
+  }));
+  const unassigned: ProposalNote[] = [];
+  for (const [index, message] of (scan.patch_messages || []).entries()) {
+    // Legacy diagnostics contain paths, not finding IDs. Never guess between
+    // multiple findings in one file; preserve ambiguous messages separately.
+    const matches = notes.filter(({ finding }) => finding && (
+      message.startsWith(`${finding.path}:`) || message.startsWith(`Patch rejected by context validation for ${finding.path}:`)
+    ));
+    if (matches.length === 1) matches[0].messages.push(message);
+    else unassigned.push({ id: `diagnostic-${index}`, messages: [message], policyRequested: false });
+  }
+  for (const note of notes) {
+    // The current API uses needs_review for both abstention and context requests.
+    // This legacy marker only enables the optional preview; it never overrides
+    // the structured remediation status or any PR/verification eligibility.
+    note.policyRequested = note.outcome?.status === 'needs_context' || (
+      note.outcome?.status === 'needs_review'
+      && note.messages.some((message) => message.startsWith(`${note.finding?.path}: AI needs context:`))
+    );
+  }
+  return [...notes.filter((note) => note.outcome || note.patch || note.messages.length), ...unassigned];
 }
 
 function Icon({ children }: { children: ReactNode }) {
@@ -155,7 +172,7 @@ export default function App() {
   const [selectedRepo, setSelectedRepo] = useState('');
   const [scan, setScan] = useState<Scan | null>(null);
   const [loading, setLoading] = useState<'connect' | 'repos' | 'scan' | 'demo' | 'pr' | 'context' | null>(null);
-  const [authorizedRoot, setAuthorizedRoot] = useState('');
+  const [authorizedRoots, setAuthorizedRoots] = useState<Record<string, string>>({});
   const [contextPreview, setContextPreview] = useState<ContextPreview | null>(null);
   const [error, setError] = useState('');
   const [prUrl, setPrUrl] = useState('');
@@ -237,6 +254,8 @@ export default function App() {
   };
 
   const runDemo = async () => {
+    setAuthorizedRoots({});
+    setContextPreview(null);
     setError('');
     setLoading('demo');
     setPrUrl('');
@@ -257,6 +276,7 @@ export default function App() {
     setPrUrl('');
     setScan(null);
     setContextPreview(null);
+    setAuthorizedRoots({});
     try {
       const created = await api<{ id: string }>('/api/scans', {
         method: 'POST',
@@ -276,7 +296,8 @@ export default function App() {
   };
 
   const previewCwe22Fix = async (finding: Finding) => {
-    if (!scan?.id || !authorizedRoot.trim()) return;
+    const authorizedRoot = authorizedRoots[finding.id]?.trim();
+    if (!scan?.id || !authorizedRoot) return;
     setError('');
     setContextPreview(null);
     setLoading('context');
@@ -321,6 +342,7 @@ export default function App() {
     }
   };
 
+  const proposalNotes = scan ? buildProposalNotes(scan) : [];
   const findingCount = scan?.findings?.length || 0;
   const patchCount = scan?.patches?.length || 0;
   const verificationStatus = String(scan?.verification?.status || 'not-run');
@@ -808,10 +830,12 @@ export default function App() {
                         <h3>{finding.title}</h3>
                         <p>{finding.description}</p>
                         {scan.verification?.finding_outcomes?.[finding.id] && (
-                          <p className="panel-boundary-note">
-                            <strong>Autopilot: {scan.verification.finding_outcomes[finding.id].status.replaceAll('_', ' ').toUpperCase()}</strong>
-                            {' · '}{scan.verification.finding_outcomes[finding.id].message}
-                          </p>
+                          <div className="finding-remediation">
+                            <span className={`autopilot-status ${outcomePresentation(scan.verification.finding_outcomes[finding.id].status).tone}`}>
+                              {outcomePresentation(scan.verification.finding_outcomes[finding.id].status).label}
+                            </span>
+                            <span>{scan.verification.finding_outcomes[finding.id].message}</span>
+                          </div>
                         )}
                       </div>
                       <span className={`confidence ${finding.status === 'reproduced' ? 'proven' : ''}`}>
@@ -987,73 +1011,96 @@ export default function App() {
                   </div>
                 )}
 
-                {scan.patch_messages && scan.patch_messages.length > 0 && (
-                  <section className="autopilot-notices" aria-label="Autopilot review notes">
+                {proposalNotes.length > 0 && (
+                  <section className="autopilot-notices" aria-labelledby="autopilot-notes-title">
                     <div className="autopilot-notices-head">
                       <div>
-                        <strong>Autopilot review notes</strong>
-                        <p>Raksa finished the scan without interruptions. You can review these unresolved items later.</p>
+                        <span className="autopilot-eyebrow">REMEDIATION DIAGNOSTICS</span>
+                        <h3 id="autopilot-notes-title">Autopilot review notes</h3>
+                        <p>Per-finding outcomes, acceptance checks, and policy context. Proposed patches remain unverified until security and regression checks pass.</p>
                       </div>
-                      <span>{scan.patch_messages.length} NOTES</span>
+                      <span className="autopilot-notes-count">{proposalNotes.filter((note) => note.finding).length} FINDINGS · {scan.patch_messages?.length || 0} DIAGNOSTICS</span>
                     </div>
-                    {scan.patch_messages.map((message, index) => {
-                      const note = describeProposalNote(message, scan.findings);
-                      const cwe22 = note.kind === 'context' && note.finding?.cwe === 'CWE-22'
-                        && note.finding.scanner === 'opengrep'
-                        && !scan.patches?.some((patch) => patch.finding_id === note.finding?.id)
-                        ? note.finding : undefined;
+                    <div className="autopilot-status-summary" aria-label="Remediation outcome counts">
+                      {[...new Set(proposalNotes.filter((note) => note.outcome).map((note) => note.outcome!.status))].map((status) => {
+                        const presentation = outcomePresentation(status);
+                        return (
+                          <span className={`autopilot-status ${presentation.tone}`} key={status}>
+                            {presentation.label}<b>{proposalNotes.filter((note) => note.outcome?.status === status).length}</b>
+                          </span>
+                        );
+                      })}
+                    </div>
+                    {proposalNotes.map((note) => {
+                      const presentation = outcomePresentation(note.outcome?.status);
+                      const cwe22 = note.policyRequested && note.finding?.cwe === 'CWE-22'
+                        && note.finding.scanner === 'opengrep' && !note.patch
+                        && scan.status === 'completed' ? note.finding : undefined;
                       return (
-                        <article className="autopilot-notice" key={`${index}-${message}`}>
+                        <article className="autopilot-notice" key={note.id}>
                           <div className="autopilot-notice-top">
-                            <span className={`autopilot-notice-mark ${note.kind}`} aria-hidden="true">
-                              {note.kind === 'rejected' ? '×' : 'i'}
-                            </span>
-                            <div>
-                              <strong>{note.title}</strong>
+                            <div className="autopilot-notice-identity">
+                              <div className="autopilot-notice-meta">
+                                {note.finding?.cwe && <span className="autopilot-cwe">{note.finding.cwe}</span>}
+                                <span className={`autopilot-status ${presentation.tone}`}>{presentation.label}</span>
+                                {note.outcome?.status === 'patch_proposed' && <span className="autopilot-unverified">UNVERIFIED</span>}
+                              </div>
+                              <h4>{note.finding?.title || 'Unassigned proposal diagnostic'}</h4>
                               {note.finding && (
-                                <span className="autopilot-notice-file">
-                                  {note.finding.cwe ? `${note.finding.cwe} · ` : ''}{note.finding.path}
-                                </span>
+                                <div className="autopilot-notice-file">
+                                  <code>{note.finding.path}:{note.finding.line}</code>
+                                  <span>{note.finding.scanner || 'scanner unspecified'} · {note.finding.id}</span>
+                                </div>
                               )}
-                              <p>{note.description}</p>
                             </div>
                           </div>
-                          {cwe22 && scan.full_name && scan.base_sha && (
-                            <details className="autopilot-notice-detail">
-                              <summary>Provide file-access policy (optional)</summary>
-                              <form
-                                className="autopilot-policy-form"
-                                onSubmit={(event) => { event.preventDefault(); void previewCwe22Fix(cwe22); }}
-                              >
-                                <label htmlFor={`authorized-root-${cwe22.id}`}>
-                                  Which folder should this application be allowed to read?
-                                </label>
-                                <div className="autopilot-policy-controls">
-                                  <input
-                                    id={`authorized-root-${cwe22.id}`}
-                                    value={authorizedRoot}
-                                    maxLength={256}
-                                    onChange={(event) => setAuthorizedRoot(event.target.value)}
-                                    placeholder="e.g. uploads/"
-                                    required
-                                    disabled={loading !== null}
-                                  />
-                                  <button type="submit" disabled={loading !== null || !authorizedRoot.trim()}>
-                                    {loading === 'context' ? 'Generating preview…' : 'Preview suggested fix'}
-                                  </button>
-                                </div>
-                                <small>Only enter a folder if you know the application's intended policy. This preview does not change GitHub or verify the fix.</small>
-                              </form>
-                            </details>
+                          {note.outcome?.message && <p className="autopilot-outcome-message">{note.outcome.message}</p>}
+                          {note.messages.length > 0 && (
+                            <div className="autopilot-diagnostics">
+                              <span className="autopilot-detail-label">{note.policyRequested ? 'Needs Context · policy request' : 'Proposal diagnostics'}</span>
+                              {note.messages.map((message, index) => (
+                                <p className="autopilot-technical-message" key={index}>{message}</p>
+                              ))}
+                            </div>
                           )}
-                          <details className="autopilot-notice-detail">
-                            <summary>Technical details</summary>
-                            <p className="autopilot-technical-message">{message}</p>
-                          </details>
+                          {note.patch?.reason && (
+                            <div className="autopilot-diagnostics">
+                              <span className="autopilot-detail-label">Candidate rationale</span>
+                              <p className="autopilot-outcome-message">{note.patch.reason}</p>
+                            </div>
+                          )}
+                          {cwe22 && scan.full_name && scan.base_sha && (
+                            <form
+                              className="autopilot-policy-form"
+                              onSubmit={(event) => { event.preventDefault(); void previewCwe22Fix(cwe22); }}
+                            >
+                              <div className="autopilot-policy-heading">
+                                <strong>File-access policy</strong><span>OPTIONAL · PREVIEW ONLY</span>
+                              </div>
+                              <label htmlFor={`authorized-root-${cwe22.id}`}>Authorized root (repository-relative path)</label>
+                              <div className="autopilot-policy-controls">
+                                <input
+                                  id={`authorized-root-${cwe22.id}`}
+                                  aria-describedby={`authorized-root-help-${cwe22.id}`}
+                                  value={authorizedRoots[cwe22.id] || ''}
+                                  maxLength={256}
+                                  onChange={(event) => setAuthorizedRoots((current) => ({ ...current, [cwe22.id]: event.target.value }))}
+                                  placeholder="uploads/"
+                                  autoCapitalize="none"
+                                  spellCheck={false}
+                                  disabled={loading !== null}
+                                />
+                                <button type="submit" disabled={loading !== null || !authorizedRoots[cwe22.id]?.trim()}>
+                                  {loading === 'context' ? 'Generating preview…' : 'Generate policy-scoped preview'}
+                                </button>
+                              </div>
+                              <small id={`authorized-root-help-${cwe22.id}`}>The scan completes independently of this input. Set the application's authorized directory to request a candidate preview at the pinned commit. Previewing does not publish changes or verify remediation.</small>
+                            </form>
+                          )}
                         </article>
                       );
                     })}
-                    <p className="autopilot-notices-foot">Review notes are not verification evidence. Unverified patches must be tested before merging.</p>
+                    <p className="autopilot-notices-foot">Static acceptance is not security verification. Review the diff and security/regression evidence before merging.</p>
                   </section>
                 )}
 
