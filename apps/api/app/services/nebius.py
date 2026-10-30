@@ -265,6 +265,18 @@ class NebiusService:
             "finding": finding,
             "source": source[:14000],
         }
+        if not is_sqli:
+            user["output_contract"] = {
+                "decision": "patch | needs_context | abstain",
+                "patch_fields": [
+                    "decision", "path", "old_text", "new_text", "reason",
+                    "behavior_change", "assumptions",
+                ],
+                "needs_context_fields": ["decision", "path", "question"],
+                "abstain_fields": ["decision", "path", "reason"],
+                "required_path": path,
+                "verification_claims_allowed": False,
+            }
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": json.dumps(user)},
