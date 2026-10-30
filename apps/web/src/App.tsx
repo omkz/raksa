@@ -43,6 +43,17 @@ type Scan = {
   patch_messages?: string[];
 };
 
+type ContextPreview = {
+  decision: 'patch' | 'needs_context' | 'abstain' | 'rejected';
+  finding_id: string;
+  path: string;
+  authorized_root: string;
+  base_sha: string;
+  patch: Patch | null;
+  diff: string;
+  diagnostics: string[];
+  verification: { status: 'unverified'; eligible_for_pr: false; message: string };
+};
 type Health = { status: string; integrations: Record<string, boolean> };
 type GithubStatus = { configured: boolean; connected: boolean; app_slug?: string | null };
 
@@ -101,7 +112,9 @@ export default function App() {
   const [repos, setRepos] = useState<Repo[]>([]);
   const [selectedRepo, setSelectedRepo] = useState('');
   const [scan, setScan] = useState<Scan | null>(null);
-  const [loading, setLoading] = useState<'connect' | 'repos' | 'scan' | 'demo' | 'pr' | null>(null);
+  const [loading, setLoading] = useState<'connect' | 'repos' | 'scan' | 'demo' | 'pr' | 'context' | null>(null);
+  const [authorizedRoot, setAuthorizedRoot] = useState('');
+  const [contextPreview, setContextPreview] = useState<ContextPreview | null>(null);
   const [error, setError] = useState('');
   const [prUrl, setPrUrl] = useState('');
 
@@ -155,6 +168,7 @@ export default function App() {
     setRepos([]);
     setSelectedRepo('');
     setScan(null);
+    setContextPreview(null);
   };
 
   const connectGithub = async () => {
@@ -200,6 +214,7 @@ export default function App() {
     setLoading('scan');
     setPrUrl('');
     setScan(null);
+    setContextPreview(null);
     try {
       const created = await api<{ id: string }>('/api/scans', {
         method: 'POST',
@@ -213,6 +228,30 @@ export default function App() {
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Repository scan failed.');
+    } finally {
+      setLoading(null);
+    }
+  };
+
+  const previewCwe22Fix = async (finding: Finding) => {
+    if (!scan?.id || !authorizedRoot.trim()) return;
+    setError('');
+    setContextPreview(null);
+    setLoading('context');
+    try {
+      const preview = await api<ContextPreview>(
+        `/api/scans/${scan.id}/context-remediation`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            finding_id: finding.id,
+            authorized_root: authorizedRoot.trim(),
+          }),
+        },
+      );
+      setContextPreview(preview);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not preview a context-aware patch.');
     } finally {
       setLoading(null);
     }
@@ -904,12 +943,77 @@ export default function App() {
                     </div>
                     {scan.patch_messages.map((message) => {
                       const needsContext = message.includes('AI needs context:');
+                      const cwe22 = needsContext
+                        ? scan.findings?.find((item) =>
+                            item.cwe === 'CWE-22'
+                            && item.scanner === 'opengrep'
+                            && message.startsWith(`${item.path}:`)
+                            && !scan.patches?.some((patch) => patch.finding_id === item.id))
+                        : undefined;
                       return (
-                        <p className={needsContext ? 'panel-boundary-note' : 'small-warning'} key={message}>
-                          {needsContext ? 'ℹ' : '⚠'} {message}
-                        </p>
+                        <div key={message}>
+                          <p className={needsContext ? 'panel-boundary-note' : 'small-warning'}>
+                            {needsContext ? 'ℹ' : '⚠'} {message}
+                          </p>
+                          {cwe22 && scan.full_name && scan.base_sha && (
+                            <form
+                              onSubmit={(event) => { event.preventDefault(); void previewCwe22Fix(cwe22); }}
+                              style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', margin: '12px 0' }}
+                            >
+                              <label htmlFor="authorized-root" style={{ width: '100%' }}>
+                                Authorized directory (relative to application/project root)
+                              </label>
+                              <input
+                                id="authorized-root"
+                                value={authorizedRoot}
+                                maxLength={256}
+                                onChange={(event) => setAuthorizedRoot(event.target.value)}
+                                placeholder="uploads/"
+                                required
+                                disabled={loading !== null}
+                                style={{ minWidth: '170px', flex: '1 1 180px' }}
+                              />
+                              <button
+                                type="submit"
+                                disabled={loading !== null || !authorizedRoot.trim()}
+                              >
+                                {loading === 'context' ? 'Asking Nemotron…' : 'Preview CWE-22 fix'}
+                              </button>
+                              <small style={{ width: '100%' }}>
+                                Developer-approved security policy only. Preview does not modify the repository or verify a fix.
+                              </small>
+                            </form>
+                          )}
+                        </div>
                       );
                     })}
+                  </div>
+                )}
+
+                {contextPreview && (
+                  <div className="summary-box">
+                    <div className="summary-head">
+                      <strong>CWE-22 contextual remediation preview</strong>
+                      <small>UNVERIFIED · NO PR CREATION</small>
+                    </div>
+                    <p>
+                      {contextPreview.path} · developer-authorized root:
+                      {' '}{contextPreview.authorized_root}
+                    </p>
+                    <p>{contextPreview.verification.message}</p>
+                    <small>Decision: {contextPreview.decision} · pinned commit {contextPreview.base_sha.slice(0, 12)}</small>
+                    {contextPreview.patch && (
+                      <div className="patch-reason">
+                        <span>AI CANDIDATE — NOT SECURITY VERIFIED</span>
+                        <p>{contextPreview.patch.reason}</p>
+                      </div>
+                    )}
+                    {contextPreview.diff && (
+                      <pre className="diff-code" style={{ overflowX: 'auto' }}>{contextPreview.diff}</pre>
+                    )}
+                    {contextPreview.diagnostics.map((message, index) => (
+                      <p className="small-warning" key={index}>{message}</p>
+                    ))}
                   </div>
                 )}
 
