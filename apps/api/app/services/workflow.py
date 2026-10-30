@@ -1,5 +1,6 @@
 import difflib
 import logging
+import re
 import uuid
 from typing import Any
 
@@ -97,6 +98,12 @@ async def run_scan_job(
         candidate_proposals: list[tuple[dict[str, str], dict[str, Any]]] = []
         patched_files = dict(files)
         patch_messages: list[str] = []
+        finding_outcomes: dict[str, dict[str, str]] = {
+            str(finding.get("id") or ""): {
+                "status": "not_attempted", "message": "No patch candidate has been evaluated."
+            }
+            for finding in findings
+        }
         if findings and nebius.configured:
             await update_job(
                 scan_id,
@@ -109,6 +116,7 @@ async def run_scan_job(
                 source = files.get(path, "")
                 if not source:
                     patch_messages.append(f"{path}: Source file not found in repository snapshot.")
+                    finding_outcomes[str(finding.get("id") or "")] = {"status": "blocked", "message": "Source file unavailable."}
                     continue
                 try:
                     proposal = await nebius.propose_patch(
@@ -119,17 +127,41 @@ async def run_scan_job(
                     )
                     if proposal:
                         candidate_proposals.append((proposal, finding))
+                    else:
+                        finding_outcomes[str(finding.get("id") or "")] = {
+                            "status": "needs_review",
+                            "message": "Nemotron did not provide a safe candidate; see proposal diagnostics.",
+                        }
                 except NebiusUnavailable as exc:
                     patch_messages.append(f"{path}: Nebius unavailable: {exc}")
+                    finding_outcomes[str(finding.get("id") or "")] = {"status": "blocked", "message": "AI service unavailable."}
                     continue
                 except Exception as exc:
                     patch_messages.append(f"{path}: Proposal generation failed: {exc}")
+                    finding_outcomes[str(finding.get("id") or "")] = {"status": "blocked", "message": "AI proposal generation failed."}
                     continue
 
         if candidate_proposals:
             for prop, finding in candidate_proposals:
                 try:
+                    # A shell-free subprocess still executes arbitrary commands if
+                    # the executable comes from the untrusted input. Reject this
+                    # common unsafe transformation rather than counting it as a fix.
+                    if str(finding.get("cwe") or "") == "CWE-78":
+                        replacement = str(prop.get("new_text") or "")
+                        if (
+                            re.search(r"shlex\.split\s*\(", replacement)
+                            and re.search(r"subprocess\.(?:run|call|Popen|check_call|check_output)\s*\(", replacement)
+                        ):
+                            raise ValueError(
+                                "Shell removal alone is insufficient: command selection "
+                                "still comes from input. An explicit trusted command "
+                                "and constrained arguments are required."
+                            )
                     patched_files = apply_exact_replacements(patched_files, [prop])
+                    finding_outcomes[str(finding.get("id") or "")] = {
+                        "status": "patch_proposed", "message": "Source-anchored candidate; security verification pending."
+                    }
                     proposals.append({
                         **prop,
                         "scanner": str(finding.get("scanner") or "raksa"),
@@ -138,6 +170,7 @@ async def run_scan_job(
                     })
                 except ValueError as exc:
                     patch_messages.append(f"Patch rejected by context validation for {prop.get('path')}: {exc}")
+                    finding_outcomes[str(finding.get("id") or "")] = {"status": "rejected", "message": str(exc)[:300]}
 
         changed_files = {
             path: content for path, content in patched_files.items()
@@ -236,6 +269,16 @@ async def run_scan_job(
                 "eligible_for_pr": False,
             }
 
+        # Per-finding reporting is independent of the scan-wide PR safety gate.
+        # Never infer that an OpenGrep candidate passed differential tests.
+        if verification.get("status") == "verified":
+            for proposal in proposals:
+                finding_id = str(proposal.get("finding_id") or "")
+                if finding_id in finding_outcomes and proposal.get("scanner") == "raksa":
+                    finding_outcomes[finding_id] = {
+                        "status": "verified", "message": "SQLi verification gate passed."
+                    }
+        verification["finding_outcomes"] = finding_outcomes
         verification["scanner_runs"] = scanner_reports
 
         await complete_job(
