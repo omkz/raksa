@@ -1,4 +1,5 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
+import { associateFindingsAndPatches } from './patchAssociation.ts';
 
 type Repo = {
   full_name: string;
@@ -160,14 +161,14 @@ function verificationStatusPresentation(status: string, scanStatus?: string): { 
 
 function buildProposalNotes(scan: Scan): ProposalNote[] {
   const findings = scan.findings || [];
+  const patches = scan.patches || [];
   const outcomes = scan.verification?.finding_outcomes || {};
+  const association = associateFindingsAndPatches(findings, patches);
   const notes = findings.map((finding): ProposalNote => ({
     id: finding.id,
     finding,
     outcome: outcomes[finding.id],
-    patch: scan.patches?.find((patch) =>
-      patch.finding_id === finding.id || (!patch.finding_id && (scan.patches?.length === 1 || patch.path === finding.path))
-    ),
+    patch: association.findingToPatch.get(finding.id),
     messages: [],
     policyRequested: false,
   }));
@@ -377,6 +378,10 @@ export default function App() {
     }
   };
 
+  const patchAssociation = useMemo(
+    () => associateFindingsAndPatches(scan?.findings, scan?.patches),
+    [scan?.findings, scan?.patches]
+  );
   const proposalNotes = scan ? buildProposalNotes(scan) : [];
   const diagnosticNotes = proposalNotes.filter((note) => note.messages.length > 0 || note.policyRequested || !note.patch);
   const existingPrUrl = prUrl || scan?.pull_request_url;
@@ -886,9 +891,7 @@ export default function App() {
                 {scan.findings?.map((finding) => {
                   const note = proposalNotes.find((item) => item.finding?.id === finding.id);
                   const presentation = outcomePresentation(note?.outcome?.status);
-                  const patchIndex = scan.patches?.findIndex((patch) =>
-                    patch.finding_id === finding.id || (!patch.finding_id && (scan.findings?.length === 1 || patch.path === finding.path))
-                  ) ?? -1;
+                  const patchIndex = patchAssociation.findingToPatchIndex.get(finding.id) ?? -1;
                   const hasPatch = patchIndex >= 0;
                   const hasDiagnostics = diagnosticNotes.some((item) => item.finding?.id === finding.id);
                   const remediationLink = hasPatch
@@ -991,16 +994,20 @@ export default function App() {
                       ))}
                     </pre>}
                     {scan.patches?.map((patch, index) => {
-                      const patchFindingId = patch.finding_id || (scan.findings?.length === 1 ? scan.findings[0]?.id : undefined);
+                      const patchFindingId = patchAssociation.patchToFindingId.get(index);
                       const hasDiagnosticHistory = patchFindingId ? diagnosticNotes.some((item) => item.finding?.id === patchFindingId) : false;
                       return (
                       <div className="patch-reason" id={`patch-${index}`} key={`${patch.path}-${index}`}>
                         <span>CANDIDATE RATIONALE · {patch.cwe || 'APPSEC'}</span>
                         <div className="patch-reference">
                           <code>{patch.path}</code>
-                          {patchFindingId && (scan.findings?.some((finding) => finding.id === patchFindingId)
-                            ? <a href={`#finding-${encodeURIComponent(patchFindingId)}`}>Finding {patchFindingId} ↑</a>
-                            : <code>Finding ID: {patchFindingId}</code>)}
+                          {patchFindingId ? (
+                            scan.findings?.some((finding) => finding.id === patchFindingId)
+                              ? <a href={`#finding-${encodeURIComponent(patchFindingId)}`}>Finding {patchFindingId} ↑</a>
+                              : <code>Finding ID: {patchFindingId}</code>
+                          ) : (
+                            <code>Unassigned patch proposal</code>
+                          )}
                           {hasDiagnosticHistory && (
                             <a href={`#remediation-note-${encodeURIComponent(patchFindingId!)}`}>Diagnostic history ↓</a>
                           )}
@@ -1036,7 +1043,7 @@ export default function App() {
                         && note.finding.scanner === 'opengrep' && !note.patch
                         && scan.status === 'completed' ? note.finding : undefined;
                       const patchIndex = note.finding
-                        ? scan.patches?.findIndex((p) => p.finding_id === note.finding?.id || (!p.finding_id && (scan.findings?.length === 1 || p.path === note.finding?.path))) ?? -1
+                        ? (patchAssociation.findingToPatchIndex.get(note.finding.id) ?? -1)
                         : -1;
                       const presentation = outcomePresentation(note.outcome?.status);
                       return (
