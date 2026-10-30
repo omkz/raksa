@@ -48,17 +48,19 @@ scanner error, not an assertion that the repository is safe.
 - OpenGrep findings can now receive **AI patch proposals** (requires Nemotron)
   with exact source-context validation. A missing model-output `path` is bound
   to the file selected by Raksa, never an arbitrary model path; an explicit
-  conflicting or unsafe path is rejected. Python replacements are additionally
-  syntax-parsed, and newly introduced standard-library module references must
-  have visible bindings/imports. If Nemotron explicitly returns both replacement
-  fields as empty strings, Raksa reports **AI abstained** rather than a malformed
-  patch and does not waste a retry; missing or partially populated fields still
-  get a corrective retry with field-presence diagnostics. For a bare `{}`
-  response, the retry states the four required fields explicitly and does not
-  echo the empty object back as an example. This is especially
-  relevant when an authorized file root, command allowlist, or expression grammar
-  is not present in the repository snapshot. These checks do **not** establish
-  behavioral equivalence, runtime correctness, or exploit mitigation.
+  conflicting or unsafe path is rejected. Generic AI Fix uses three decisions:
+  **patch** (an exact-context candidate with declared behavioral changes and
+  assumptions), **needs_context** (a specific question when a required security
+  policy is missing), or **abstain** (no responsible candidate/question).
+  Existing four-field SQLi proposals and explicit empty-string abstentions remain
+  supported. Invalid/missing fields trigger one corrective retry. For a bare
+  `{}` response, the retry explicitly describes the three decision forms
+  without echoing the empty object as an assistant example. Python replacements
+  are syntax-parsed, and newly introduced standard-library module references
+  must have visible bindings/imports. A complete candidate may deliberately
+  change dangerous behavior, but must disclose the change; it cannot invent an
+  authorized directory or allowed command policy. These checks do **not**
+  establish behavioral equivalence, runtime correctness, or exploit mitigation.
 - These proposals are **not verified** by the current SQLi-only gate. Any
   scan with an accepted OpenGrep patch is **unverified** and **ineligible for
   draft PR creation**, even when a SQLi patch is also present.
