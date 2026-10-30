@@ -97,7 +97,12 @@ def interpret_model_patch_decision(
     # The target file is fixed by the scanner, never selected by the model.
     target = response.get("path")
     if target not in (None, "", expected_path):
-        return None, "invalid", f"Wrong path: response targets another file, expected {expected_path}."
+        # Keep the offending model-supplied path in bounded, escaped diagnostics.
+        # It remains rejected: never silently rewrite an explicit wrong target.
+        reported_path = repr(str(target)[:180])
+        return None, "invalid", (
+            f"Wrong path: response targets {reported_path} instead of expected {expected_path!r}."
+        )
     if not _safe_relative_path(expected_path):
         return None, "invalid", "Wrong path: unsafe target file."
 
