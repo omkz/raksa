@@ -248,11 +248,28 @@ async def create_pull_request(
         ]
         if not selected:
             raise HTTPException(409, "No eligible review-only patches remain.")
-        original = job.get("source_files") or {}
-        if not original or any(patch.get("path") not in original for patch in selected):
-            raise HTTPException(409, "Original scan source is unavailable; run a new scan.")
+        # Source files are intentionally NOT persisted on ScanJob. Re-fetch the
+        # exact pinned snapshot and reconstruct only the eligible review diff.
+        # This also avoids trusting client-provided source contents.
         try:
-            selected_patched = apply_exact_replacements(dict(original), selected)
+            original, _repo_meta, snapshot_sha = await github_app.get_snapshot(
+                str(installation_id),
+                str(job["full_name"]),
+                max_files=settings.max_repository_files,
+                max_file_bytes=settings.max_file_bytes,
+                max_repository_bytes=settings.max_repository_bytes,
+                commit_sha=str(job["base_sha"]),
+            )
+        except GitHubAppError as exc:
+            raise HTTPException(
+                502, "Unable to reload the original GitHub snapshot for this review PR."
+            ) from exc
+        if snapshot_sha != job["base_sha"]:
+            raise HTTPException(409, "GitHub snapshot commit does not match the original scan.")
+        if any(patch.get("path") not in original for patch in selected):
+            raise HTTPException(409, "A selected source file is absent from the pinned snapshot.")
+        try:
+            selected_patched = apply_exact_replacements(original, selected)
         except ValueError as exc:
             raise HTTPException(409, "Review candidate no longer matches scanned source.") from exc
         pr_files = {
