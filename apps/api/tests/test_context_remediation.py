@@ -191,3 +191,60 @@ async def test_nebius_context_policy_sent_with_bounded_filename_constraints(
     assert supplied["authorized_root"] == "uploads/"
     assert "symlink escapes" in " ".join(supplied["constraints"])
     fake_client.chat.completions.create.assert_awaited_once()
+
+
+
+@pytest.mark.asyncio
+async def test_context_preview_rejects_snapshot_commit_mismatch_before_ai_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.routers.scans.get_job", AsyncMock(return_value=_job()))
+    monkeypatch.setattr(
+        "app.routers.scans.github_app.get_snapshot",
+        AsyncMock(return_value=({"src/unsafe_path.py": "x = 1\n"}, {}, "another-sha")),
+    )
+    fake_nebius = MagicMock()
+    fake_nebius.configured = True
+    fake_nebius.propose_patch = AsyncMock()
+    monkeypatch.setattr("app.routers.scans.nebius", fake_nebius)
+    with pytest.raises(HTTPException) as exc:
+        await preview_context_remediation(
+            "job1", ContextRemediationRequest(finding_id="cwe22", authorized_root="uploads/"),
+            MagicMock(session={}), _auth(),
+        )
+    assert exc.value.status_code == 409
+    fake_nebius.propose_patch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_context_preview_needs_more_information_still_unverified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job = _job()
+    fake_nebius = MagicMock()
+    fake_nebius.configured = True
+
+    async def request_more(*, diagnostics: list[str], **kwargs: object) -> None:
+        diagnostics.append(
+            "src/unsafe_path.py: AI needs context: Is uploads/ relative to a configured app root?"
+        )
+        return None
+
+    fake_nebius.propose_patch = AsyncMock(side_effect=request_more)
+    monkeypatch.setattr("app.routers.scans.get_job", AsyncMock(return_value=job))
+    monkeypatch.setattr(
+        "app.routers.scans.github_app.get_snapshot",
+        AsyncMock(return_value=({"src/unsafe_path.py": "value = 1\n"}, {}, "sha1")),
+    )
+    monkeypatch.setattr("app.routers.scans.nebius", fake_nebius)
+    monkeypatch.setattr("app.routers.scans.record_audit_event", AsyncMock())
+
+    response = await preview_context_remediation(
+        "job1", ContextRemediationRequest(finding_id="cwe22", authorized_root="uploads/"),
+        MagicMock(session={}), _auth(),
+    )
+    assert response["decision"] == "needs_context"
+    assert response["patch"] is None
+    assert response["diff"] == ""
+    assert response["verification"]["status"] == "unverified"
+    assert response["verification"]["eligible_for_pr"] is False
