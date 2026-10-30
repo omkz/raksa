@@ -189,6 +189,16 @@ async def run_scan_job(
         else:
             if not nebius.configured:
                 no_patch_msg = "No validated patch was prepared. Configure NEBIUS_API_KEY to enable model-assisted patch proposals."
+            elif any("AI needs context:" in item for item in patch_messages):
+                no_patch_msg = (
+                    "No patch was prepared: AI needs a specific security-policy or "
+                    "behavior requirement from the developer. See AI patch diagnostics."
+                )
+            elif patch_messages and all("AI abstained:" in item for item in patch_messages):
+                no_patch_msg = (
+                    "No patch was prepared: AI abstained rather than inventing a fix. "
+                    "See AI patch diagnostics."
+                )
             elif patch_messages:
                 no_patch_msg = f"No validated patch was prepared. Proposal rejected: {patch_messages[-1]}"
             else:
