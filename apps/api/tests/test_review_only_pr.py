@@ -37,7 +37,6 @@ def _original_files() -> dict[str, str]:
 
 
 def _scan_job() -> dict:
-    files = _original_files()
     return {
         "id": "review-scan",
         "workspace_id": "ws-1",
