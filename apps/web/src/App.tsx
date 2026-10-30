@@ -37,7 +37,7 @@ type Scan = {
   diff?: string | null;
   summary?: string | null;
   research?: { title: string; url: string; content: string }[];
-  verification?: Record<string, any>;
+  verification?: Record<string, any> & { finding_outcomes?: Record<string, { status: string; message: string }> };
   pull_request_url?: string | null;
   error?: string | null;
   patch_messages?: string[];
@@ -761,6 +761,12 @@ export default function App() {
                         </div>
                         <h3>{finding.title}</h3>
                         <p>{finding.description}</p>
+                        {scan.verification?.finding_outcomes?.[finding.id] && (
+                          <p className="panel-boundary-note">
+                            <strong>Autopilot: {scan.verification.finding_outcomes[finding.id].status.replaceAll('_', ' ').toUpperCase()}</strong>
+                            {' · '}{scan.verification.finding_outcomes[finding.id].message}
+                          </p>
+                        )}
                       </div>
                       <span className={`confidence ${finding.status === 'reproduced' ? 'proven' : ''}`}>
                         {finding.status === 'reproduced' ? 'REPRODUCED' : `${Math.round(finding.confidence * 100)}% CONFIDENCE`}
@@ -961,7 +967,7 @@ export default function App() {
                               style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', margin: '12px 0' }}
                             >
                               <label htmlFor={`authorized-root-${cwe22.id}`} style={{ width: '100%' }}>
-                                Authorized directory (relative to application/project root)
+                                Optional: folder aplikasi yang boleh dibaca (hanya jika kamu tahu)
                               </label>
                               <input
                                 id={`authorized-root-${cwe22.id}`}
@@ -977,10 +983,10 @@ export default function App() {
                                 type="submit"
                                 disabled={loading !== null || !authorizedRoot.trim()}
                               >
-                                {loading === 'context' ? 'Asking Nemotron…' : 'Preview CWE-22 fix'}
+                                {loading === 'context' ? 'Asking Nemotron…' : 'Preview with my policy'}
                               </button>
                               <small style={{ width: '100%' }}>
-                                Developer-approved security policy only. Preview does not modify the repository or verify a fix.
+                                Opsional. Scan sudah selesai tanpa jawabanmu. Isi hanya untuk mencoba kandidat tambahan; ini bukan hasil verifikasi.
                               </small>
                             </form>
                           )}
