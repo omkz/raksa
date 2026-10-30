@@ -1,5 +1,6 @@
 import difflib
 import logging
+import re
 import uuid
 from typing import Any
 
@@ -14,6 +15,62 @@ from app.services.verifier import verify_remediation
 from app.state import JobOwnershipError, complete_job, fail_job, get_job, update_job
 
 logger = logging.getLogger("raksa.workflow")
+
+
+def unsafe_shell_replacement(candidate: str) -> bool:
+    """Reject shell-free wrappers that still derive executable selection from input.
+
+    This is a conservative negative filter, not proof that other patches are safe.
+    """
+    return bool(
+        re.search(r"shlex\.split\s*\(", candidate)
+        and re.search(
+            r"subprocess\.(?:run|call|Popen|check_call|check_output)\s*\(",
+            candidate,
+        )
+    )
+
+
+def unsafe_semantic_replacement(cwe: str, old: str, new: str) -> str | None:
+    """Reject known unsafe/feature-removing AI patterns; not a general verifier."""
+    if cwe == "CWE-22" and re.search(r"(?:os\.path\.)?basename\s*\(", new):
+        return (
+            "basename() alone does not establish an authorized file boundary. "
+            "A trusted root and file-access policy are required."
+        )
+    if cwe == "CWE-94" and "eval(" in old and re.search(
+        r"throw\s+new\s+Error\s*\(", new
+    ):
+        return (
+            "Replacing eval() with an unconditional throw disables behavior; "
+            "review intended functionality before proposing a fix."
+        )
+    return None
+
+
+def reviewable_patch(proposal: dict[str, str]) -> bool:
+    """Narrow allowlist for explicit human-review PRs, never security approval.
+
+    Preserve only source-anchored SQL parameters and text-only DOM output.
+    Other CWE categories require a distinct safety-policy review first.
+    """
+    new = str(proposal.get("new_text") or "")
+    old = str(proposal.get("old_text") or "")
+    cwe = str(proposal.get("cwe") or "")
+    if cwe == "CWE-89":
+        return (
+            "execute(" in new
+            and ("?" in new or "%s" in new or ":" in new)
+            and "execute(" in old
+        )
+    if cwe == "CWE-79":
+        return (
+            "innerHTML" in old
+            and "textContent" in new
+            and "innerHTML" not in new
+            and "eval(" not in new
+        )
+    return False
 
 
 async def run_scan_job(
@@ -97,6 +154,12 @@ async def run_scan_job(
         candidate_proposals: list[tuple[dict[str, str], dict[str, Any]]] = []
         patched_files = dict(files)
         patch_messages: list[str] = []
+        finding_outcomes: dict[str, dict[str, str]] = {
+            str(finding.get("id") or ""): {
+                "status": "not_attempted", "message": "No patch candidate has been evaluated."
+            }
+            for finding in findings
+        }
         if findings and nebius.configured:
             await update_job(
                 scan_id,
@@ -109,6 +172,7 @@ async def run_scan_job(
                 source = files.get(path, "")
                 if not source:
                     patch_messages.append(f"{path}: Source file not found in repository snapshot.")
+                    finding_outcomes[str(finding.get("id") or "")] = {"status": "blocked", "message": "Source file unavailable."}
                     continue
                 try:
                     proposal = await nebius.propose_patch(
@@ -119,17 +183,45 @@ async def run_scan_job(
                     )
                     if proposal:
                         candidate_proposals.append((proposal, finding))
+                    else:
+                        finding_outcomes[str(finding.get("id") or "")] = {
+                            "status": "needs_review",
+                            "message": "Nemotron did not provide a safe candidate; see proposal diagnostics.",
+                        }
                 except NebiusUnavailable as exc:
                     patch_messages.append(f"{path}: Nebius unavailable: {exc}")
+                    finding_outcomes[str(finding.get("id") or "")] = {"status": "blocked", "message": "AI service unavailable."}
                     continue
                 except Exception as exc:
                     patch_messages.append(f"{path}: Proposal generation failed: {exc}")
+                    finding_outcomes[str(finding.get("id") or "")] = {"status": "blocked", "message": "AI proposal generation failed."}
                     continue
 
         if candidate_proposals:
             for prop, finding in candidate_proposals:
                 try:
+                    # A shell-free subprocess still executes arbitrary commands if
+                    # the executable comes from the untrusted input. Reject this
+                    # common unsafe transformation rather than counting it as a fix.
+                    if str(finding.get("cwe") or "") == "CWE-78":
+                        replacement = str(prop.get("new_text") or "")
+                        if unsafe_shell_replacement(replacement):
+                            raise ValueError(
+                                "Shell removal alone is insufficient: command selection "
+                                "still comes from input. An explicit trusted command "
+                                "and constrained arguments are required."
+                            )
+                    semantic_risk = unsafe_semantic_replacement(
+                        str(finding.get("cwe") or ""),
+                        str(prop.get("old_text") or ""),
+                        str(prop.get("new_text") or ""),
+                    )
+                    if semantic_risk:
+                        raise ValueError(semantic_risk)
                     patched_files = apply_exact_replacements(patched_files, [prop])
+                    finding_outcomes[str(finding.get("id") or "")] = {
+                        "status": "patch_proposed", "message": "Source-anchored candidate; security verification pending."
+                    }
                     proposals.append({
                         **prop,
                         "scanner": str(finding.get("scanner") or "raksa"),
@@ -138,6 +230,7 @@ async def run_scan_job(
                     })
                 except ValueError as exc:
                     patch_messages.append(f"Patch rejected by context validation for {prop.get('path')}: {exc}")
+                    finding_outcomes[str(finding.get("id") or "")] = {"status": "rejected", "message": str(exc)[:300]}
 
         changed_files = {
             path: content for path, content in patched_files.items()
@@ -182,13 +275,24 @@ async def run_scan_job(
                 "message": (
                     "AI-generated OpenGrep patch proposal(s) require manual review. "
                     "No category-specific differential security or regression verification ran. "
-                    "Draft PR creation is disabled."
+                    "Verified PR creation is disabled. An explicit review-only Draft PR "
+                    "may be available for selected unverified candidates."
                 ),
                 "eligible_for_pr": False,
             }
         else:
             if not nebius.configured:
                 no_patch_msg = "No validated patch was prepared. Configure NEBIUS_API_KEY to enable model-assisted patch proposals."
+            elif any("AI needs context:" in item for item in patch_messages):
+                no_patch_msg = (
+                    "No patch was prepared: AI needs a specific security-policy or "
+                    "behavior requirement from the developer. See AI patch diagnostics."
+                )
+            elif patch_messages and all("AI abstained:" in item for item in patch_messages):
+                no_patch_msg = (
+                    "No patch was prepared: AI abstained rather than inventing a fix. "
+                    "See AI patch diagnostics."
+                )
             elif patch_messages:
                 no_patch_msg = f"No validated patch was prepared. Proposal rejected: {patch_messages[-1]}"
             else:
@@ -226,6 +330,20 @@ async def run_scan_job(
                 "eligible_for_pr": False,
             }
 
+        # Per-finding reporting is independent of the scan-wide PR safety gate.
+        # Never infer that an OpenGrep candidate passed differential tests.
+        if verification.get("status") == "verified":
+            for proposal in proposals:
+                finding_id = str(proposal.get("finding_id") or "")
+                if finding_id in finding_outcomes and proposal.get("scanner") == "raksa":
+                    finding_outcomes[finding_id] = {
+                        "status": "verified", "message": "SQLi verification gate passed."
+                    }
+        verification["review_pr_finding_ids"] = [
+            str(proposal["finding_id"]) for proposal in proposals
+            if reviewable_patch(proposal)
+        ]
+        verification["finding_outcomes"] = finding_outcomes
         verification["scanner_runs"] = scanner_reports
 
         await complete_job(

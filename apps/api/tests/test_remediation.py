@@ -389,3 +389,93 @@ async def test_no_validated_patch_does_not_say_configure_nebius_when_configured(
     assert "Configure Nebius" not in verification_msg
     assert "No validated patch was prepared" in verification_msg
     assert "Proposal rejected" in verification_msg
+
+
+def test_python_proposal_rejects_syntax_error_before_workflow() -> None:
+    source = "def run():\n    return 1\n"
+    proposal = {
+        "path": "app.py",
+        "old_text": "return 1",
+        "new_text": "return (",
+        "reason": "Bad generated patch",
+    }
+    validated, error = validate_patch_proposal(proposal, "app.py", source)
+    assert validated is None
+    assert error is not None and "Python syntax error" in error
+
+    with pytest.raises(ValueError, match="Python syntax error"):
+        apply_exact_replacements({"app.py": source}, [proposal])
+
+
+def test_python_proposal_rejects_new_stdlib_reference_without_import() -> None:
+    """Regression for demo OpenGrep patch that used subprocess/shlex without imports."""
+    source = "import os\n\ndef unsafe_command(user_input):\n    return os.system(user_input)\n"
+    proposal = {
+        "path": "src/unsafe_shell.py",
+        "old_text": "return os.system(user_input)",
+        "new_text": "return subprocess.run(shlex.split(user_input)).returncode",
+        "reason": "Model suggestion only; unsafe without a command allowlist",
+    }
+    validated, error = validate_patch_proposal(proposal, "src/unsafe_shell.py", source)
+    assert validated is None
+    assert error is not None and "Missing Python module import" in error
+    assert "shlex" in error and "subprocess" in error
+
+    with pytest.raises(ValueError, match="Missing Python module import"):
+        apply_exact_replacements({"src/unsafe_shell.py": source}, [proposal])
+
+
+def test_python_proposal_accepts_imports_with_exact_replacement() -> None:
+    source = "import os\n\ndef original(value):\n    return os.system(value)\n"
+    replacement = (
+        "import os\nimport shlex\nimport subprocess\n\n"
+        "def original(value):\n    return subprocess.run(shlex.split(value)).returncode\n"
+    )
+    proposal = {
+        "path": "src/unsafe_shell.py",
+        "old_text": source,
+        "new_text": replacement,
+        "reason": "Only checks static shape, not security or behavior",
+    }
+    validated, error = validate_patch_proposal(proposal, "src/unsafe_shell.py", source)
+    assert error is None
+    assert validated == proposal
+    assert apply_exact_replacements({"src/unsafe_shell.py": source}, [proposal]) == {
+        "src/unsafe_shell.py": replacement
+    }
+
+
+@pytest.mark.asyncio
+async def test_python_missing_import_causes_corrective_model_retry() -> None:
+    service = NebiusService()
+    mock_client = MagicMock()
+    source = "import os\n\ndef run(value):\n    return os.system(value)\n"
+    bad_patch = {
+        "path": "src/unsafe_shell.py",
+        "old_text": "return os.system(value)",
+        "new_text": "return subprocess.run(shlex.split(value)).returncode",
+    }
+    good_patch = {
+        "path": "src/unsafe_shell.py",
+        "old_text": source,
+        "new_text": "import os\nimport shlex\nimport subprocess\n\ndef run(value):\n    return subprocess.run(shlex.split(value)).returncode\n",
+    }
+    mock_client.chat.completions.create = AsyncMock(
+        side_effect=[
+            MagicMock(choices=[MagicMock(message=MagicMock(content=json.dumps(bad_patch)))]),
+            MagicMock(choices=[MagicMock(message=MagicMock(content=json.dumps(good_patch)))]),
+        ]
+    )
+    service._client = MagicMock(return_value=mock_client)
+    diagnostics: list[str] = []
+
+    result = await service.propose_patch(
+        path="src/unsafe_shell.py", source=source,
+        finding={"scanner": "opengrep", "cwe": "CWE-78", "line": 4},
+        diagnostics=diagnostics,
+    )
+    assert result == {**good_patch, "reason": "Security remediation proposal"}
+    assert mock_client.chat.completions.create.await_count == 2
+    retry_messages = mock_client.chat.completions.create.await_args.kwargs["messages"]
+    assert "Missing Python module import" in retry_messages[-1]["content"]
+    assert any("corrected patch accepted" in d for d in diagnostics)

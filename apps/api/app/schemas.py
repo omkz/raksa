@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class HealthResponse(BaseModel):
@@ -19,6 +19,34 @@ class RepositoryItem(BaseModel):
 
 class ScanRequest(BaseModel):
     full_name: str = Field(min_length=3, max_length=200, pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+
+class ContextRemediationRequest(BaseModel):
+    """Developer-approved context for one CWE-22 patch preview."""
+
+    finding_id: str = Field(min_length=1, max_length=64)
+    authorized_root: str = Field(min_length=1, max_length=256)
+
+    @field_validator("authorized_root")
+    @classmethod
+    def validate_authorized_root(cls, value: str) -> str:
+        # A relative POSIX application-root directory, not a host filesystem path.
+        # Exclude shell/control punctuation and special path components; the model
+        # must independently validate untrusted request filenames at runtime.
+        root = value.rstrip("/")
+        parts = root.split("/")
+        if (
+            not root
+            or any(
+                part in {"", ".", ".."}
+                or not all(char.isascii() and (char.isalnum() or char in "._-") for char in part)
+                for part in parts
+            )
+        ):
+            raise ValueError(
+                "authorized_root must be a relative application directory such as uploads/"
+            )
+        return root + "/"
 
 
 class Finding(BaseModel):
@@ -89,5 +117,6 @@ class ScanResult(BaseModel):
 
 
 class CreatePRRequest(BaseModel):
+    review_only: bool = False
     title: str = Field(default="Raksa security remediation", min_length=5, max_length=200)
     body: str = Field(default="This pull request was prepared by Raksa. Please review the code and test evidence carefully.", max_length=8000)

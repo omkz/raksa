@@ -190,3 +190,413 @@ async def test_opengrep_only_finding_produces_unverified_patch(
     assert job["verification"]["eligible_for_pr"] is False
     assert job["verification"]["status"] == "unverified"
     gate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_missing_model_path_is_bound_to_trusted_finding_target() -> None:
+    """Nebius may omit path; the app chooses the already-scanned file, not the model."""
+    service = NebiusService()
+    mock_client = MagicMock()
+    source = (
+        "from flask import request\n"
+        "def read_file():\n"
+        '    with open(request.args.get("filename"), encoding="utf-8") as handle:\n'
+        "        return handle.read()\n"
+    )
+    pathless_patch = {
+        "old_text": 'open(request.args.get("filename"), encoding="utf-8")',
+        "new_text": 'open(allowed_file, encoding="utf-8")',
+        "reason": "Illustrative candidate only: requires behavioral verification",
+    }
+    mock_client.chat.completions.create = AsyncMock(
+        return_value=MagicMock(
+            choices=[MagicMock(message=MagicMock(content=json.dumps(pathless_patch)))]
+        )
+    )
+    service._client = MagicMock(return_value=mock_client)
+
+    proposal = await service.propose_patch(
+        path="src/unsafe_path.py", source=source,
+        finding={"scanner": "opengrep", "cwe": "CWE-22", "line": 3},
+    )
+    assert proposal is not None
+    assert proposal["path"] == "src/unsafe_path.py"
+    assert proposal["new_text"] == pathless_patch["new_text"]
+    mock_client.chat.completions.create.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_explicitly_wrong_model_path_is_not_overwritten() -> None:
+    """Do not turn an explicit model-selected different file into a valid patch."""
+    service = NebiusService()
+    mock_client = MagicMock()
+    source = "value = 1\n"
+    wrong_path = {
+        "path": "src/other.py",
+        "old_text": "value = 1",
+        "new_text": "value = 2",
+        "reason": "Wrong target",
+    }
+    mock_client.chat.completions.create = AsyncMock(
+        return_value=MagicMock(
+            choices=[MagicMock(message=MagicMock(content=json.dumps(wrong_path)))]
+        )
+    )
+    service._client = MagicMock(return_value=mock_client)
+    diagnostics: list[str] = []
+
+    proposal = await service.propose_patch(
+        path="src/expected.py", source=source,
+        finding={"scanner": "opengrep", "cwe": "CWE-22", "line": 1},
+        diagnostics=diagnostics,
+    )
+    assert proposal is None
+    assert mock_client.chat.completions.create.await_count == 2
+    assert len(diagnostics) == 1
+    assert "Wrong path" in diagnostics[0]
+    assert "src/other.py" in diagnostics[0]
+
+
+
+@pytest.mark.asyncio
+async def test_explicit_model_abstention_is_not_retried_as_invalid_json() -> None:
+    """A deliberate no-patch response is safe and should not waste a retry."""
+    service = NebiusService()
+    mock_client = MagicMock()
+    source = "def read_file(name):\n    return open(name).read()\n"
+    abstention = {
+        "path": "src/unsafe_path.py",
+        "old_text": "",
+        "new_text": "",
+        "reason": "No authorized filesystem root is specified by the application.",
+    }
+    mock_client.chat.completions.create = AsyncMock(
+        return_value=MagicMock(
+            choices=[MagicMock(message=MagicMock(content=json.dumps(abstention)))]
+        )
+    )
+    service._client = MagicMock(return_value=mock_client)
+    diagnostics: list[str] = []
+    proposal = await service.propose_patch(
+        path="src/unsafe_path.py", source=source,
+        finding={"scanner": "opengrep", "cwe": "CWE-22", "line": 2},
+        diagnostics=diagnostics,
+    )
+    assert proposal is None
+    mock_client.chat.completions.create.assert_awaited_once()
+    assert len(diagnostics) == 1
+    assert "AI abstained" in diagnostics[0]
+    assert "No patch was applied or verified" in diagnostics[0]
+    assert "authorized filesystem root" in diagnostics[0]
+
+
+@pytest.mark.asyncio
+async def test_missing_model_old_text_is_not_confused_with_abstention() -> None:
+    """Malformed output retains corrective retry and explains which field is absent."""
+    service = NebiusService()
+    mock_client = MagicMock()
+    source = "def run(value):\n    return value\n"
+    malformed = {
+        "path": "src/unsafe_shell.py",
+        "new_text": "return safe_value",
+        "reason": "Model accidentally omitted old_text",
+    }
+    mock_client.chat.completions.create = AsyncMock(
+        return_value=MagicMock(
+            choices=[MagicMock(message=MagicMock(content=json.dumps(malformed)))]
+        )
+    )
+    service._client = MagicMock(return_value=mock_client)
+    diagnostics: list[str] = []
+    proposal = await service.propose_patch(
+        path="src/unsafe_shell.py", source=source,
+        finding={"scanner": "opengrep", "cwe": "CWE-78", "line": 2},
+        diagnostics=diagnostics,
+    )
+    assert proposal is None
+    assert mock_client.chat.completions.create.await_count == 2
+    assert len(diagnostics) == 1
+    assert "Proposal rejected after retry" in diagnostics[0]
+    assert "old_text=missing" in diagnostics[0]
+    assert "new_text=present" in diagnostics[0]
+    assert "AI abstained" not in diagnostics[0]
+
+
+@pytest.mark.asyncio
+async def test_abstention_after_malformed_attempt_is_reported_as_such() -> None:
+    service = NebiusService()
+    mock_client = MagicMock()
+    source = "def run(value):\n    return value\n"
+    first = {"path": "src/unsafe_shell.py", "new_text": "return something"}
+    second = {
+        "old_text": "",
+        "new_text": "",
+        "reason": "The command allowlist is unknown; cannot safely preserve behavior.",
+    }
+    mock_client.chat.completions.create = AsyncMock(
+        side_effect=[
+            MagicMock(choices=[MagicMock(message=MagicMock(content=json.dumps(first)))]),
+            MagicMock(choices=[MagicMock(message=MagicMock(content=json.dumps(second)))]),
+        ]
+    )
+    service._client = MagicMock(return_value=mock_client)
+    diagnostics: list[str] = []
+    proposal = await service.propose_patch(
+        path="src/unsafe_shell.py", source=source,
+        finding={"scanner": "opengrep", "cwe": "CWE-78", "line": 2},
+        diagnostics=diagnostics,
+    )
+    assert proposal is None
+    assert mock_client.chat.completions.create.await_count == 2
+    assert len(diagnostics) == 1
+    assert "AI abstained after retry" in diagnostics[0]
+    assert "command allowlist is unknown" in diagnostics[0]
+
+
+
+@pytest.mark.asyncio
+async def test_empty_json_retry_uses_explicit_schema_without_echoing_empty_object() -> None:
+    """A bare {} is malformed, not evidence that a safe fix was declined."""
+    service = NebiusService()
+    mock_client = MagicMock()
+    source = (
+        "from flask import request\n"
+        "def read_file():\n"
+        '    return open(request.args.get("filename"), encoding="utf-8").read()\n'
+    )
+    decline = {
+        "path": "src/unsafe_path.py",
+        "old_text": "",
+        "new_text": "",
+        "reason": "No permitted root directory is specified for user filenames.",
+    }
+    mock_client.chat.completions.create = AsyncMock(
+        side_effect=[
+            MagicMock(choices=[MagicMock(message=MagicMock(content="{}"))]),
+            MagicMock(choices=[MagicMock(message=MagicMock(content=json.dumps(decline)))]),
+        ]
+    )
+    service._client = MagicMock(return_value=mock_client)
+    diagnostics: list[str] = []
+
+    proposal = await service.propose_patch(
+        path="src/unsafe_path.py", source=source,
+        finding={"scanner": "opengrep", "cwe": "CWE-22", "line": 3},
+        diagnostics=diagnostics,
+    )
+    assert proposal is None
+    assert mock_client.chat.completions.create.await_count == 2
+    retry_messages = mock_client.chat.completions.create.await_args.kwargs["messages"]
+    assert [message["role"] for message in retry_messages] == [
+        "system", "user", "user"
+    ]
+    assert "patch: decision" in retry_messages[-1]["content"]
+    assert "needs_context: decision" in retry_messages[-1]["content"]
+    assert "Do not return {}" in retry_messages[-1]["content"]
+    assert "AI abstained after retry" in diagnostics[0]
+
+
+
+@pytest.mark.asyncio
+async def test_generic_patch_decision_accepts_candidate_with_declared_behavior_change() -> None:
+    service = NebiusService()
+    mock_client = MagicMock()
+    source = "function render(node, value) {\n  node.innerHTML = value;\n}\n"
+    candidate = {
+        "decision": "patch",
+        "path": "src/view.js",
+        "old_text": "node.innerHTML = value",
+        "new_text": "node.textContent = value",
+        "reason": "Treat the message as plain text.",
+        "behavior_change": "HTML markup in messages is now displayed literally.",
+        "assumptions": ["The UI expects plain text, not rich HTML."],
+    }
+    mock_client.chat.completions.create = AsyncMock(
+        return_value=MagicMock(
+            choices=[MagicMock(message=MagicMock(content=json.dumps(candidate)))]
+        )
+    )
+    service._client = MagicMock(return_value=mock_client)
+    result = await service.propose_patch(
+        path="src/view.js", source=source,
+        finding={"scanner": "opengrep", "cwe": "CWE-79", "line": 2},
+    )
+    assert result is not None
+    assert result["old_text"] == candidate["old_text"]
+    assert result["new_text"] == candidate["new_text"]
+    assert "Behavior change: HTML markup" in result["reason"]
+    assert "Assumptions: The UI expects plain text" in result["reason"]
+    assert "decision" not in result
+    mock_client.chat.completions.create.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_needs_context_is_not_retried_or_counted_as_patch() -> None:
+    service = NebiusService()
+    mock_client = MagicMock()
+    source = "from flask import request\nx = open(request.args.get('filename')).read()\n"
+    answer = {
+        "decision": "needs_context",
+        "path": "src/unsafe_path.py",
+        "question": "Which directory is authorized for user-selected files?",
+    }
+    mock_client.chat.completions.create = AsyncMock(
+        return_value=MagicMock(
+            choices=[MagicMock(message=MagicMock(content=json.dumps(answer)))]
+        )
+    )
+    service._client = MagicMock(return_value=mock_client)
+    diagnostics: list[str] = []
+    result = await service.propose_patch(
+        path="src/unsafe_path.py", source=source,
+        finding={"scanner": "opengrep", "cwe": "CWE-22", "line": 2},
+        diagnostics=diagnostics,
+    )
+    assert result is None
+    assert len(diagnostics) == 1
+    assert diagnostics[0].startswith("src/unsafe_path.py: AI needs context:")
+    assert "Which directory" in diagnostics[0]
+    mock_client.chat.completions.create.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_explicit_abstain_is_not_retried() -> None:
+    service = NebiusService()
+    mock_client = MagicMock()
+    answer = {
+        "decision": "abstain",
+        "path": "src/unsafe_eval.js",
+        "reason": "No meaningful candidate can be scoped from this snapshot.",
+    }
+    mock_client.chat.completions.create = AsyncMock(
+        return_value=MagicMock(
+            choices=[MagicMock(message=MagicMock(content=json.dumps(answer)))]
+        )
+    )
+    service._client = MagicMock(return_value=mock_client)
+    diagnostics: list[str] = []
+    result = await service.propose_patch(
+        path="src/unsafe_eval.js", source="eval(value)\n",
+        finding={"scanner": "opengrep", "cwe": "CWE-94", "line": 1},
+        diagnostics=diagnostics,
+    )
+    assert result is None
+    assert "AI abstained:" in diagnostics[0]
+    mock_client.chat.completions.create.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_wrong_path_needs_context_decision_is_rejected_and_retried() -> None:
+    service = NebiusService()
+    mock_client = MagicMock()
+    answer = {
+        "decision": "needs_context",
+        "path": "../other.py",
+        "question": "Which root is permitted?",
+    }
+    mock_client.chat.completions.create = AsyncMock(
+        return_value=MagicMock(
+            choices=[MagicMock(message=MagicMock(content=json.dumps(answer)))]
+        )
+    )
+    service._client = MagicMock(return_value=mock_client)
+    diagnostics: list[str] = []
+    result = await service.propose_patch(
+        path="src/unsafe_path.py", source="value = 1\n",
+        finding={"scanner": "opengrep", "cwe": "CWE-22", "line": 1},
+        diagnostics=diagnostics,
+    )
+    assert result is None
+    assert mock_client.chat.completions.create.await_count == 2
+    assert len(diagnostics) == 1
+    assert "Wrong path" in diagnostics[0]
+    assert "AI needs context:" not in diagnostics[0]
+
+
+@pytest.mark.asyncio
+async def test_invalid_decision_is_retried_and_not_counted_as_patch() -> None:
+    service = NebiusService()
+    mock_client = MagicMock()
+    answer = {"decision": "verified", "path": "src/view.js", "reason": "Claims passed"}
+    mock_client.chat.completions.create = AsyncMock(
+        return_value=MagicMock(
+            choices=[MagicMock(message=MagicMock(content=json.dumps(answer)))]
+        )
+    )
+    service._client = MagicMock(return_value=mock_client)
+    diagnostics: list[str] = []
+    result = await service.propose_patch(
+        path="src/view.js", source="const x = 1;\n",
+        finding={"scanner": "opengrep", "cwe": "CWE-79", "line": 1},
+        diagnostics=diagnostics,
+    )
+    assert result is None
+    assert mock_client.chat.completions.create.await_count == 2
+    assert "Invalid decision" in diagnostics[0]
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("diagnostic", "expected"),
+    [
+        (
+            "AI needs context: Which directory is authorized? No patch was applied or verified.",
+            "AI needs a specific security-policy",
+        ),
+        (
+            "AI abstained: No safe candidate is available. No patch was applied or verified.",
+            "AI abstained rather than inventing a fix",
+        ),
+    ],
+)
+async def test_no_patch_decisions_are_not_reported_as_rejections(
+    monkeypatch: pytest.MonkeyPatch, diagnostic: str, expected: str
+) -> None:
+    files = {"src/view.js": "function render(node, value) { node.innerHTML = value; }\n"}
+    finding = SecurityFinding(
+        id="xss-no-patch", title="Potential XSS", severity="medium", path="src/view.js",
+        line=1, evidence="node.innerHTML = value", description="DOM HTML sink",
+        confidence=0.65, scanner="opengrep", rule_id="raksa.javascript-html-injection",
+        cwe="CWE-79",
+    )
+
+    async def fake_propose(
+        *, path: str, source: str, finding: dict[str, Any],
+        diagnostics: list[str] | None = None,
+    ) -> None:
+        if diagnostics is not None:
+            diagnostics.append(f"{path}: {diagnostic}")
+        return None
+
+    fake_nebius = MagicMock()
+    fake_nebius.configured = True
+    fake_nebius.propose_patch = AsyncMock(side_effect=fake_propose)
+    fake_nebius.summarize_findings = AsyncMock(return_value="Potential XSS.")
+    monkeypatch.setattr("app.services.workflow.nebius", fake_nebius)
+    monkeypatch.setattr(
+        "app.services.workflow.github_app.get_snapshot",
+        AsyncMock(return_value=(files, {"default_branch": "main"}, "base123")),
+    )
+    monkeypatch.setattr(
+        "app.services.workflow.scan_snapshot",
+        AsyncMock(return_value=[ScannerResult("opengrep", "completed", [finding])]),
+    )
+    gate = AsyncMock(side_effect=AssertionError("No candidate should be verified"))
+    monkeypatch.setattr("app.services.workflow.verify_remediation", gate)
+
+    scan_id = "test-no-patch-" + expected.replace(" ", "-")[:45]
+    await put_job(scan_id, {
+        "id": scan_id, "status": "queued", "stage": "queued", "message": "Scan queued.",
+        "full_name": "owner/repo", "installation_id": "123",
+    })
+    await run_scan_job(scan_id, "123", "owner/repo")
+    job = await get_job(scan_id)
+
+    assert job is not None and job["status"] == "completed"
+    assert job["patches"] == []
+    assert job["verification"]["status"] == "unverified"
+    assert job["verification"]["eligible_for_pr"] is False
+    assert expected in job["verification"]["message"]
+    assert "Proposal rejected" not in job["verification"]["message"]
+    gate.assert_not_awaited()

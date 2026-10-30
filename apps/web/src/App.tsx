@@ -1,4 +1,5 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
+import { associateFindingsAndPatches } from './patchAssociation.ts';
 
 type Repo = {
   full_name: string;
@@ -24,6 +25,8 @@ type Finding = {
 };
 
 type Patch = { path: string; old_text: string; new_text: string; reason: string; scanner?: string; cwe?: string; finding_id?: string };
+type FindingOutcome = { status: string; message: string };
+
 type Scan = {
   id: string;
   status: 'queued' | 'running' | 'completed' | 'failed';
@@ -37,12 +40,23 @@ type Scan = {
   diff?: string | null;
   summary?: string | null;
   research?: { title: string; url: string; content: string }[];
-  verification?: Record<string, any>;
+  verification?: Record<string, any> & { finding_outcomes?: Record<string, FindingOutcome> };
   pull_request_url?: string | null;
   error?: string | null;
   patch_messages?: string[];
 };
 
+type ContextPreview = {
+  decision: 'patch' | 'needs_context' | 'abstain' | 'rejected';
+  finding_id: string;
+  path: string;
+  authorized_root: string;
+  base_sha: string;
+  patch: Patch | null;
+  diff: string;
+  diagnostics: string[];
+  verification: { status: 'unverified'; eligible_for_pr: false; message: string };
+};
 type Health = { status: string; integrations: Record<string, boolean> };
 type GithubStatus = { configured: boolean; connected: boolean; app_slug?: string | null };
 
@@ -88,6 +102,98 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+type ProposalNote = {
+  id: string;
+  finding?: Finding;
+  outcome?: FindingOutcome;
+  patch?: Patch;
+  messages: string[];
+  policyRequested: boolean;
+};
+
+function outcomePresentation(status?: string): { label: string; tone: string } {
+  const statuses: Record<string, { label: string; tone: string }> = {
+    patch_proposed: { label: 'Patch Proposed', tone: 'proposed' },
+    rejected: { label: 'Rejected', tone: 'rejected' },
+    needs_context: { label: 'Needs Context', tone: 'context' },
+    needs_review: { label: 'Needs Review', tone: 'review' },
+    blocked: { label: 'Blocked', tone: 'blocked' },
+    not_attempted: { label: 'Not Attempted', tone: 'neutral' },
+    verified: { label: 'Verified', tone: 'verified' },
+  };
+  return status && Object.hasOwn(statuses, status) ? statuses[status] : {
+    label: status ? `Unknown Status (${status})` : 'Diagnostics Only', tone: 'neutral',
+  };
+}
+
+function verificationCheckPresentation(check: { status?: string; passed?: boolean }): { label: string; tone: string } {
+  const status = check.status;
+  if (status === 'passed') return check.passed === true
+    ? { label: '✓ PASSED', tone: 'good-text' }
+    : { label: '— PASSED STATUS · PASS FLAG NOT CONFIRMED', tone: '' };
+  if (status === 'failed' || status === 'error') return { label: `✕ ${status.toUpperCase()}`, tone: 'bad-text' };
+  // A false passed flag also accompanies not_run, skipped, and unavailable.
+  // Display the actual check state instead of labeling every false flag FAILED.
+  if (status) return { label: `— ${status.replaceAll('_', ' ').toUpperCase()}`, tone: '' };
+  return check.passed === true ? { label: '✓ PASSED', tone: 'good-text' } : { label: '— NOT REPORTED', tone: '' };
+}
+
+function verificationStatusPresentation(status: string, scanStatus?: string): { label: string; tone: string } {
+  if (scanStatus === 'failed') {
+    return { label: 'FAILED', tone: 'bad' };
+  }
+  switch (status) {
+    case 'verified':
+      return { label: 'VERIFIED', tone: 'good' };
+    case 'failed':
+      return { label: 'FAILED', tone: 'bad' };
+    case 'error':
+      return { label: 'ERROR', tone: 'bad' };
+    case 'unverified':
+      return { label: 'UNVERIFIED', tone: 'pending' };
+    case 'not_run':
+    case 'not-run':
+      return { label: 'NOT RUN', tone: 'pending' };
+    default:
+      return { label: status.replaceAll('_', ' ').toUpperCase(), tone: 'pending' };
+  }
+}
+
+function buildProposalNotes(scan: Scan): ProposalNote[] {
+  const findings = scan.findings || [];
+  const patches = scan.patches || [];
+  const outcomes = scan.verification?.finding_outcomes || {};
+  const association = associateFindingsAndPatches(findings, patches);
+  const notes = findings.map((finding): ProposalNote => ({
+    id: finding.id,
+    finding,
+    outcome: outcomes[finding.id],
+    patch: association.findingToPatch.get(finding.id),
+    messages: [],
+    policyRequested: false,
+  }));
+  const unassigned: ProposalNote[] = [];
+  for (const [index, message] of (scan.patch_messages || []).entries()) {
+    // Legacy diagnostics contain paths, not finding IDs. Never guess between
+    // multiple findings in one file; preserve ambiguous messages separately.
+    const matches = notes.filter(({ finding }) => finding && (
+      message.startsWith(`${finding.path}:`) || message.startsWith(`Patch rejected by context validation for ${finding.path}:`)
+    ));
+    if (matches.length === 1) matches[0].messages.push(message);
+    else unassigned.push({ id: `diagnostic-${index}`, messages: [message], policyRequested: false });
+  }
+  for (const note of notes) {
+    // The current API uses needs_review for both abstention and context requests.
+    // This legacy marker only enables the optional preview; it never overrides
+    // the structured remediation status or any PR/verification eligibility.
+    note.policyRequested = note.outcome?.status === 'needs_context' || (
+      note.outcome?.status === 'needs_review'
+      && note.messages.some((message) => message.startsWith(`${note.finding?.path}: AI needs context:`))
+    );
+  }
+  return [...notes, ...unassigned];
+}
+
 function Icon({ children }: { children: ReactNode }) {
   return <span className="icon" aria-hidden="true">{children}</span>;
 }
@@ -101,7 +207,9 @@ export default function App() {
   const [repos, setRepos] = useState<Repo[]>([]);
   const [selectedRepo, setSelectedRepo] = useState('');
   const [scan, setScan] = useState<Scan | null>(null);
-  const [loading, setLoading] = useState<'connect' | 'repos' | 'scan' | 'demo' | 'pr' | null>(null);
+  const [loading, setLoading] = useState<'connect' | 'repos' | 'scan' | 'demo' | 'pr' | 'context' | null>(null);
+  const [authorizedRoots, setAuthorizedRoots] = useState<Record<string, string>>({});
+  const [contextPreview, setContextPreview] = useState<ContextPreview | null>(null);
   const [error, setError] = useState('');
   const [prUrl, setPrUrl] = useState('');
 
@@ -155,6 +263,7 @@ export default function App() {
     setRepos([]);
     setSelectedRepo('');
     setScan(null);
+    setContextPreview(null);
   };
 
   const connectGithub = async () => {
@@ -181,6 +290,8 @@ export default function App() {
   };
 
   const runDemo = async () => {
+    setAuthorizedRoots({});
+    setContextPreview(null);
     setError('');
     setLoading('demo');
     setPrUrl('');
@@ -200,6 +311,8 @@ export default function App() {
     setLoading('scan');
     setPrUrl('');
     setScan(null);
+    setContextPreview(null);
+    setAuthorizedRoots({});
     try {
       const created = await api<{ id: string }>('/api/scans', {
         method: 'POST',
@@ -218,6 +331,31 @@ export default function App() {
     }
   };
 
+  const previewCwe22Fix = async (finding: Finding) => {
+    const authorizedRoot = authorizedRoots[finding.id]?.trim();
+    if (!scan?.id || !authorizedRoot) return;
+    setError('');
+    setContextPreview(null);
+    setLoading('context');
+    try {
+      const preview = await api<ContextPreview>(
+        `/api/scans/${scan.id}/context-remediation`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            finding_id: finding.id,
+            authorized_root: authorizedRoot.trim(),
+          }),
+        },
+      );
+      setContextPreview(preview);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not preview a context-aware patch.');
+    } finally {
+      setLoading(null);
+    }
+  };
+
   const createPr = async () => {
     if (!scan?.id) return;
     setError('');
@@ -226,8 +364,9 @@ export default function App() {
       const result = await api<{ url: string }>('/api/scans/' + scan.id + '/pull-request', {
         method: 'POST',
         body: JSON.stringify({
-          title: `security: remediate potential SQL injection (${scan.full_name})`,
-          body: `## Summary\nPrepared by Raksa for review.\n\n## Verification evidence\n${scan.verification?.message || 'See attached scan evidence.'}\n\nPlease review the diff and test results carefully before merging.`,
+          review_only: !eligibleForPr,
+          title: `security: review Raksa candidate fixes (${scan.full_name})`,
+          body: `## Summary\nPrepared by Raksa for review.\n\n## ${eligibleForPr ? 'Verification evidence' : 'UNVERIFIED review candidate'}\n${scan.verification?.message || 'See attached scan evidence.'}\n\nPlease review the diff and test results carefully before merging.`,
         }),
       });
       setPrUrl(result.url);
@@ -239,10 +378,22 @@ export default function App() {
     }
   };
 
+  const patchAssociation = useMemo(
+    () => associateFindingsAndPatches(scan?.findings, scan?.patches),
+    [scan?.findings, scan?.patches]
+  );
+  const proposalNotes = scan ? buildProposalNotes(scan) : [];
+  const diagnosticNotes = proposalNotes.filter((note) => note.messages.length > 0 || note.policyRequested || !note.patch);
+  const existingPrUrl = prUrl || scan?.pull_request_url;
   const findingCount = scan?.findings?.length || 0;
   const patchCount = scan?.patches?.length || 0;
-  const verificationStatus = String(scan?.verification?.status || 'not-run');
-  const verified = Boolean(scan?.verification?.eligible_for_pr);
+  const verificationStatus = String(scan?.verification?.status || 'not_run');
+  const isVerificationPassed = verificationStatus === 'verified';
+  const isVerificationFailed = verificationStatus === 'failed' || verificationStatus === 'error';
+  const eligibleForPr = Boolean(scan?.verification?.eligible_for_pr);
+  const reviewPrCount = Array.isArray(scan?.verification?.review_pr_finding_ids)
+    ? scan.verification.review_pr_finding_ids.length : 0;
+  const canCreatePr = eligibleForPr || reviewPrCount > 0;
   const integrationCount = useMemo(() => Object.values(health?.integrations || {}).filter(Boolean).length, [health]);
 
   if (checkingAuth) {
@@ -663,15 +814,17 @@ export default function App() {
           </div>
         )}
 
-        {scan && (
+        {scan && (() => {
+          const statusBadge = verificationStatusPresentation(verificationStatus, scan.status);
+          return (
           <section className="results-section" aria-labelledby="results-heading">
             <div className="section-heading results-heading">
               <div>
                 <span className="section-index">02</span>
-                <h2 id="results-heading">Investigation results &amp; verification</h2>
+                <h2 id="results-heading">Investigation results</h2>
               </div>
-              <span className={`result-status ${scan.status === 'failed' ? 'bad' : verified || verificationStatus === 'verified' ? 'good' : 'pending'}`}>
-                <i aria-hidden="true" /> {scan.status === 'failed' ? 'FAILED' : verificationStatus.replaceAll('_', ' ').toUpperCase()}
+              <span className={`result-status ${statusBadge.tone}`}>
+                <i aria-hidden="true" /> {statusBadge.label}
               </span>
             </div>
 
@@ -698,10 +851,18 @@ export default function App() {
                   </div>
                   <div className="metric-card">
                     <span>VERIFICATION</span>
-                    <strong className={verified || verificationStatus === 'verified' ? 'green-number' : ''}>
-                      {verified || verificationStatus === 'verified' ? '✓' : '—'}
+                    <strong className={isVerificationPassed ? 'green-number' : isVerificationFailed ? 'bad-text' : ''}>
+                      {isVerificationPassed ? '✓' : isVerificationFailed ? '✕' : '—'}
                     </strong>
-                    <small>{verified ? 'Evidence verified' : 'Not fully verified'}</small>
+                    <small>
+                      {isVerificationPassed
+                        ? 'Evidence verified'
+                        : isVerificationFailed
+                          ? (verificationStatus === 'failed' ? 'Verification failed' : 'Verification error')
+                          : verificationStatus === 'unverified'
+                            ? 'Not fully verified'
+                            : 'Not run'}
+                    </small>
                   </div>
                   <div className="metric-card">
                     <span>REPOSITORY</span>
@@ -710,22 +871,69 @@ export default function App() {
                   </div>
                 </div>
 
-                {scan.findings?.map((finding) => (
-                  <article className="finding-card" key={finding.id}>
+                <nav className="results-nav" aria-label="Investigation result sections">
+                  <a href="#findings"><span>01</span> Findings <b>{findingCount}</b></a>
+                  <a href="#remediation"><span>02</span> Remediation <b>{patchCount} proposed</b></a>
+                  <a href="#verification"><span>03</span> Verification &amp; Pull Request</a>
+                </nav>
+                <section className="results-area" id="findings" aria-labelledby="findings-heading">
+                  <div className="results-area-heading"><span>01</span><div><h3 id="findings-heading">Findings</h3><p>Detection results and final per-finding remediation outcomes.</p></div></div>
+                    <div className="autopilot-status-summary" aria-label="Remediation outcome counts">
+                      {[...new Set(proposalNotes.filter((note) => note.outcome).map((note) => note.outcome!.status))].map((status) => {
+                        const presentation = outcomePresentation(status);
+                        return (
+                          <span className={`autopilot-status ${presentation.tone}`} key={status}>
+                            {presentation.label}<b>{proposalNotes.filter((note) => note.outcome?.status === status).length}</b>
+                          </span>
+                        );
+                      })}
+                    </div>
+                {scan.findings?.map((finding) => {
+                  const note = proposalNotes.find((item) => item.finding?.id === finding.id);
+                  const presentation = outcomePresentation(note?.outcome?.status);
+                  const patchIndex = patchAssociation.findingToPatchIndex.get(finding.id) ?? -1;
+                  const hasPatch = patchIndex >= 0;
+                  const hasDiagnostics = diagnosticNotes.some((item) => item.finding?.id === finding.id);
+                  const remediationLink = hasPatch
+                    ? `#patch-${patchIndex}`
+                    : hasDiagnostics
+                      ? `#remediation-note-${encodeURIComponent(finding.id)}`
+                      : '#remediation';
+                  return (
+                  <article className="finding-card" id={`finding-${encodeURIComponent(finding.id)}`} key={finding.id}>
                     <div className="finding-top">
                       <div className="finding-symbol" aria-hidden="true">!</div>
                       <div className="finding-title">
                         <div>
                           <span className={`severity ${finding.severity}`}>{finding.severity.toUpperCase()}</span>
                           <span className="finding-cwe">{finding.cwe || 'APPSEC'}</span>
-                          <span className="finding-cwe">{finding.scanner === 'opengrep' ? 'OPENGREP · POTENTIAL' : 'RAKSA AST'}</span>
+                          <span className="finding-cwe">{finding.scanner || 'Scanner not reported'}</span>
                         </div>
-                        <h3>{finding.title}</h3>
+                        <h4>{finding.title}</h4>
                         <p>{finding.description}</p>
+                        <div className="finding-remediation">
+                          <span className={`autopilot-status ${presentation.tone}`}>
+                            {note?.outcome ? presentation.label : 'Remediation Not Reported'}
+                          </span>
+                          {note?.outcome?.status === 'patch_proposed' && <span className="autopilot-unverified">UNVERIFIED</span>}
+                          {note?.outcome?.message && <span>{note.outcome.message}</span>}
+                        </div>
+                        {note?.policyRequested && note.messages.filter((message) => message.startsWith(`${finding.path}: AI needs context:`)).map((message, index) => (
+                          <p className="finding-policy-context" key={index}>{message}</p>
+                        ))}
+                        <div className="finding-reference">
+                          <code>ID: {finding.id}</code>
+                          {finding.rule_id && <code>Rule: {finding.rule_id}</code>}
+                          <a href={remediationLink}>Review remediation <span aria-hidden="true">↓</span></a>
+                          {hasPatch && hasDiagnostics && (
+                            <a href={`#remediation-note-${encodeURIComponent(finding.id)}`}>Diagnostic history <span aria-hidden="true">↓</span></a>
+                          )}
+                        </div>
                       </div>
-                      <span className={`confidence ${finding.status === 'reproduced' ? 'proven' : ''}`}>
-                        {finding.status === 'reproduced' ? 'REPRODUCED' : `${Math.round(finding.confidence * 100)}% CONFIDENCE`}
-                      </span>
+                      <div className="finding-detection">
+                        <span className="confidence">{Math.round(finding.confidence * 100)}% Detection Confidence</span>
+                        {finding.status === 'reproduced' && <span className="confidence proven">EXPLOIT REPRODUCED</span>}
+                      </div>
                     </div>
                     <div className="finding-evidence">
                       <div className="evidence-path">
@@ -736,8 +944,13 @@ export default function App() {
                       <pre><code>{finding.evidence}</code></pre>
                     </div>
                   </article>
-                ))}
+                );
+                })}
 
+                {findingCount === 0 && <p className="results-empty">{scan.status === 'completed' ? 'No findings reported by the configured scanners.' : 'Detection results will appear as the investigation progresses.'}</p>}
+                {Array.isArray(scan.verification?.scanner_runs) && scan.verification.scanner_runs.length > 0 && (
+                  <details className="scanner-details results-disclosure">
+                    <summary>Scanner execution details</summary>
                 {Array.isArray(scan.verification?.scanner_runs) && scan.verification.scanner_runs.map((runner: { name: string; status: string; finding_count: number; message: string }) => (
                   <div className="summary-box" key={runner.name}>
                     <div className="summary-head"><strong>{runner.name.toUpperCase()} SCANNER</strong><small>{runner.status.toUpperCase()}</small></div>
@@ -745,27 +958,32 @@ export default function App() {
                   </div>
                 ))}
 
+                  </details>
+                )}
+                </section>
+                <section className="results-area" id="remediation" aria-labelledby="remediation-heading">
+                  <div className="results-area-heading"><span>02</span><div><h3 id="remediation-heading">Remediation</h3><p>Review candidate changes, model analysis, and diagnostic history. A proposed patch is not verification evidence.</p></div></div>
                 {scan.summary && (
-                  <div className="summary-box">
-                    <div className="summary-head">
+                  <details className="summary-box results-disclosure">
+                    <summary className="summary-head">
                       <span aria-hidden="true">✳</span>
                       <strong>Model reasoning &amp; analysis</strong>
                       <small>NEBIUS / NEMOTRON</small>
-                    </div>
+                    </summary>
                     <p>{scan.summary}</p>
-                  </div>
+                  </details>
                 )}
 
-                {scan.diff && (
-                  <div className="diff-panel">
+                {(scan.diff || patchCount > 0) && (
+                  <div className="diff-panel" id="remediation-diff">
                     <div className="diff-header">
                       <div>
                         <span className="diff-icon" aria-hidden="true">±</span>
-                        <strong>Proposed code change</strong>
+                        <strong>Proposed code changes</strong>
                       </div>
                       <span>{patchCount ? `${patchCount} proposed patch${patchCount === 1 ? '' : 'es'}` : 'DEMO DIFF'}</span>
                     </div>
-                    <pre className="diff-code">
+                    {scan.diff && <pre className="diff-code">
                       {scan.diff.split('\n').map((line, index) => (
                         <div
                           key={`${index}-${line}`}
@@ -774,62 +992,218 @@ export default function App() {
                           {line || ' '}
                         </div>
                       ))}
-                    </pre>
-                    {scan.patches?.map((patch, index) => (
-                      <div className="patch-reason" key={`${patch.path}-${index}`}>
-                        <span>REMEDIATION RATIONALE</span>
+                    </pre>}
+                    {scan.patches?.map((patch, index) => {
+                      const patchFindingId = patchAssociation.patchToFindingId.get(index);
+                      const hasDiagnosticHistory = patchFindingId ? diagnosticNotes.some((item) => item.finding?.id === patchFindingId) : false;
+                      return (
+                      <div className="patch-reason" id={`patch-${index}`} key={`${patch.path}-${index}`}>
+                        <span>CANDIDATE RATIONALE · {patch.cwe || 'APPSEC'}</span>
+                        <div className="patch-reference">
+                          <code>{patch.path}</code>
+                          {patchFindingId ? (
+                            scan.findings?.some((finding) => finding.id === patchFindingId)
+                              ? <a href={`#finding-${encodeURIComponent(patchFindingId)}`}>Finding {patchFindingId} ↑</a>
+                              : <code>Finding ID: {patchFindingId}</code>
+                          ) : (
+                            <code>Unassigned patch proposal</code>
+                          )}
+                          {hasDiagnosticHistory && (
+                            <a href={`#remediation-note-${encodeURIComponent(patchFindingId!)}`}>Diagnostic history ↓</a>
+                          )}
+                        </div>
                         <p>{patch.reason}</p>
-                        <small>{patch.path}{patch.cwe ? ` · ${patch.cwe}` : ''}{patch.scanner ? ` · ${patch.scanner}` : ''} · AI PROPOSAL — NOT AUTOMATICALLY VERIFIED</small>
+                        {!scan.diff && (
+                          <details className="patch-source results-disclosure">
+                            <summary>Exact source replacement</summary>
+                            <div className="patch-source-block"><strong>Original source</strong><pre><code>{patch.old_text}</code></pre></div>
+                            <div className="patch-source-block"><strong>Proposed replacement · unverified</strong><pre><code>{patch.new_text}</code></pre></div>
+                          </details>
+                        )}
+                        <small>{patch.scanner || 'AI'} · PROPOSAL — NOT AUTOMATICALLY VERIFIED</small>
                       </div>
+                    );
+                    })}
+                  </div>
+                )}
+
+                {!scan.diff && patchCount === 0 && <p className="results-empty">No candidate code changes were prepared. Review finding outcomes and available diagnostics.</p>}
+                {diagnosticNotes.length > 0 && (
+                  <section className="autopilot-notices" aria-labelledby="autopilot-notes-title">
+                    <div className="autopilot-notices-head">
+                      <div>
+                        <span className="autopilot-eyebrow">POLICY & DIAGNOSTIC HISTORY</span>
+                        <h3 id="autopilot-notes-title">Remediation context & history</h3>
+                        <p>Policy previews and original model diagnostics. Retry history does not change the final finding outcome.</p>
+                      </div>
+                      <span className="autopilot-notes-count">{diagnosticNotes.length} {diagnosticNotes.length === 1 ? 'NOTE' : 'NOTES'}</span>
+                    </div>
+                    {diagnosticNotes.map((note) => {
+                      const cwe22 = note.policyRequested && note.finding?.cwe === 'CWE-22'
+                        && note.finding.scanner === 'opengrep' && !note.patch
+                        && scan.status === 'completed' ? note.finding : undefined;
+                      const patchIndex = note.finding
+                        ? (patchAssociation.findingToPatchIndex.get(note.finding.id) ?? -1)
+                        : -1;
+                      const presentation = outcomePresentation(note.outcome?.status);
+                      return (
+                        <div className="autopilot-notice" id={note.finding ? `remediation-note-${encodeURIComponent(note.finding.id)}` : undefined} key={note.id}>
+                          <div className="remediation-reference">
+                            {note.finding ? <>
+                              <span className="autopilot-cwe">{note.finding.cwe || 'APPSEC'}</span>
+                              <code>{note.finding.path}:{note.finding.line}</code>
+                              <a href={`#finding-${encodeURIComponent(note.finding.id)}`}>Finding {note.finding.id} ↑</a>
+                              {patchIndex >= 0 && (
+                                <a href={`#patch-${patchIndex}`}>Patch candidate ↓</a>
+                              )}
+                            </> : <strong>Unassigned diagnostic</strong>}
+                          </div>
+                          {note.policyRequested ? (
+                            <p className="autopilot-outcome-message">Policy context requested. The remediation status remains {presentation.label}.</p>
+                          ) : note.outcome ? (
+                            <p className="autopilot-outcome-message">
+                              <strong className={`autopilot-status-inline ${presentation.tone}`}>{presentation.label}:</strong> {note.outcome.message}
+                            </p>
+                          ) : null}
+                          {!note.outcome && note.messages.length > 0 && <p className="autopilot-technical-message">{note.messages[note.messages.length - 1]}</p>}
+                          {note.messages.length > 0 && (
+                            <details className="diagnostic-history">
+                              <summary>Raw diagnostic history <span>{note.messages.length} {note.messages.length === 1 ? 'entry' : 'entries'}</span></summary>
+                              {note.messages.map((message, index) => (
+                                <p className="autopilot-technical-message" key={index}>{message}</p>
+                              ))}
+                            </details>
+                          )}
+                          {cwe22 && scan.full_name && scan.base_sha && (
+                            <form
+                              className="autopilot-policy-form"
+                              onSubmit={(event) => { event.preventDefault(); void previewCwe22Fix(cwe22); }}
+                            >
+                              <div className="autopilot-policy-heading">
+                                <strong>File-access policy</strong><span>OPTIONAL · PREVIEW ONLY</span>
+                              </div>
+                              <label htmlFor={`authorized-root-${cwe22.id}`}>Authorized root (repository-relative path)</label>
+                              <div className="autopilot-policy-controls">
+                                <input
+                                  id={`authorized-root-${cwe22.id}`}
+                                  aria-describedby={`authorized-root-help-${cwe22.id}`}
+                                  value={authorizedRoots[cwe22.id] || ''}
+                                  maxLength={256}
+                                  onChange={(event) => setAuthorizedRoots((current) => ({ ...current, [cwe22.id]: event.target.value }))}
+                                  placeholder="uploads/"
+                                  autoCapitalize="none"
+                                  spellCheck={false}
+                                  disabled={loading !== null}
+                                />
+                                <button type="submit" disabled={loading !== null || !authorizedRoots[cwe22.id]?.trim()}>
+                                  {loading === 'context' ? 'Generating preview…' : 'Generate policy-scoped preview'}
+                                </button>
+                              </div>
+                              <small id={`authorized-root-help-${cwe22.id}`}>The scan completes independently of this input. Set the application's authorized directory to request a candidate preview at the pinned commit. Previewing does not publish changes or verify remediation.</small>
+                            </form>
+                          )}
+                        </div>
+                      );
+                    })}
+                    <p className="autopilot-notices-foot">Static acceptance is not security verification. Review the diff and security/regression evidence before merging.</p>
+                  </section>
+                )}
+
+                {contextPreview && (
+                  <div className="summary-box">
+                    <div className="summary-head">
+                      <strong>Optional Path Traversal patch preview</strong>
+                      <small>UNVERIFIED · PREVIEW ONLY</small>
+                    </div>
+                    <p>
+                      {contextPreview.path} · developer-authorized root:
+                      {' '}{contextPreview.authorized_root}
+                    </p>
+                    <p>{contextPreview.verification.message}</p>
+                    <small>Decision: {contextPreview.decision} · pinned commit {contextPreview.base_sha.slice(0, 12)}</small>
+                    {contextPreview.patch && (
+                      <div className="patch-reason">
+                        <span>AI CANDIDATE — NOT SECURITY VERIFIED</span>
+                        <p>{contextPreview.patch.reason}</p>
+                      </div>
+                    )}
+                    {contextPreview.diff && (
+                      <pre className="diff-code" style={{ overflowX: 'auto' }}>{contextPreview.diff}</pre>
+                    )}
+                    {contextPreview.diagnostics.map((message, index) => (
+                      <p className="small-warning" key={index}>{message}</p>
                     ))}
                   </div>
                 )}
 
+                {scan.research && scan.research.length > 0 && (
+                  <details className="research-panel results-disclosure">
+                    <summary className="diff-header">
+                      <div>
+                        <span className="diff-icon" aria-hidden="true">↗</span>
+                        <strong>Security research context</strong>
+                      </div>
+                      <span>TAVILY</span>
+                    </summary>
+                    {scan.research.map((item) => (
+                      <a className="research-item" key={item.url || item.title} href={item.url || undefined} target="_blank" rel="noreferrer">
+                        <div>
+                          <strong>{item.title}</strong>
+                          <p>{item.content}</p>
+                        </div>
+                        <span aria-hidden="true">↗</span>
+                      </a>
+                    ))}
+                  </details>
+                )}
+
+                </section>
+                <section className="results-area" id="verification" aria-labelledby="verification-heading">
+                  <div className="results-area-heading"><span>03</span><div><h3 id="verification-heading">Verification &amp; Pull Request</h3><p>Executed checks and publication eligibility. Draft PR creation always requires an explicit action.</p></div></div>
                 {scan.verification && (
-                  <div className="verification-panel">
+                  <div className={`verification-panel ${isVerificationPassed ? 'verified good' : isVerificationFailed ? 'failed bad' : 'unverified'}`}>
                     <div className="verification-icon" aria-hidden="true">
-                      {verificationStatus === 'verified' ? '✓' : '◷'}
+                      {isVerificationPassed ? '✓' : isVerificationFailed ? '✕' : '◷'}
                     </div>
                     <div className="verification-copy">
                       <strong>
-                        {verificationStatus === 'verified'
+                        {isVerificationPassed
                           ? scan.verification.regression_tests?.status === 'skipped'
                             ? 'Verification gate passed (regression tests skipped)'
                             : scan.verification.regression_tests?.status === 'unavailable'
                             ? 'Security verified (regression coverage unavailable)'
                             : 'Verification gate passed'
-                          : 'Verification evidence'}
+                          : isVerificationFailed
+                            ? (verificationStatus === 'failed' ? 'Verification gate failed' : 'Verification execution error')
+                            : 'Remediation unverified'}
                       </strong>
                       <p>{String(scan.verification.message || scan.verification.evidence || 'No verification details available.')}</p>
 
-                      {scan.verification.static_recheck && (
-                        <div className="proof-results" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
-                          <div>
-                            <span>STATIC RECHECK</span>
-                            <strong className={scan.verification.static_recheck.passed ? 'good-text' : 'bad-text'}>
-                              {scan.verification.static_recheck.passed ? '✓ PASSED' : '✕ FAILED'}
-                            </strong>
-                            <small>{String(scan.verification.static_recheck.message || '')}</small>
-                          </div>
-                          {scan.verification.security_exploit && (
-                            <div>
-                              <span>SECURITY EXPLOIT TEST</span>
-                              <strong className={scan.verification.security_exploit.passed ? 'good-text' : scan.verification.security_exploit.status === 'unavailable' ? '' : 'bad-text'}>
-                                {scan.verification.security_exploit.passed ? '✓ PASSED' : scan.verification.security_exploit.status === 'unavailable' ? '— UNAVAILABLE' : '✕ FAILED'}
-                              </strong>
-                              <small>{String(scan.verification.security_exploit.message || '')}</small>
-                            </div>
-                          )}
-                          {scan.verification.regression_tests && (
-                            <div>
-                              <span>REGRESSION TESTS</span>
-                              <strong className={scan.verification.regression_tests.status === 'skipped' || scan.verification.regression_tests.status === 'unavailable' ? '' : scan.verification.regression_tests.passed ? 'good-text' : 'bad-text'}>
-                                {scan.verification.regression_tests.status === 'skipped' ? '— SKIPPED' : scan.verification.regression_tests.status === 'unavailable' ? '— UNAVAILABLE' : scan.verification.regression_tests.passed ? '✓ PASSED' : '✕ FAILED'}
-                              </strong>
-                              <small>{String(scan.verification.regression_tests.message || '')}</small>
-                            </div>
-                          )}
+                      {(scan.verification.static_recheck || scan.verification.security_exploit || scan.verification.regression_tests) && (
+                        <div className="proof-results" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(180px, 100%), 1fr))' }}>
+                          {([
+                            ['static_recheck', 'STATIC RECHECK'],
+                            ['security_exploit', 'SECURITY EXPLOIT TEST'],
+                            ['regression_tests', 'REGRESSION TESTS'],
+                          ] as const).map(([key, label]) => {
+                            const check = scan.verification?.[key];
+                            if (!check) return null;
+                            const presentation = verificationCheckPresentation(check);
+                            return (
+                              <div key={key}>
+                                <span>{label}</span>
+                                <strong className={presentation.tone}>{presentation.label}</strong>
+                                <small>{String(check.message || '')}</small>
+                              </div>
+                            );
+                          })}
                         </div>
+                      )}
+
+                      {!isVerificationPassed && !isVerificationFailed && (
+                        <p className="verification-boundary-note">
+                          Passing an individual check (such as static recheck or unrelated tests) does not constitute full verification. Differential exploit reproduction and regression testing are required to prove remediation.
+                        </p>
                       )}
 
                       {scan.verification.before && scan.verification.after && (
@@ -847,7 +1221,7 @@ export default function App() {
                           </div>
                           <div>
                             <span>AFTER (PATCHED CODE)</span>
-                            <strong className="good-text">
+                            <strong className={scan.verification.after.exploit_blocked ? 'good-text' : ''}>
                               {scan.verification.after.result_count !== undefined
                                 ? `${scan.verification.after.result_count} rows returned`
                                 : scan.verification.after.exploit_blocked
@@ -875,75 +1249,58 @@ export default function App() {
                   </div>
                 )}
 
-                {scan.research && scan.research.length > 0 && (
-                  <div className="research-panel">
-                    <div className="diff-header">
-                      <div>
-                        <span className="diff-icon" aria-hidden="true">↗</span>
-                        <strong>Security research context</strong>
-                      </div>
-                      <span>TAVILY</span>
-                    </div>
-                    {scan.research.map((item) => (
-                      <a className="research-item" key={item.url || item.title} href={item.url || undefined} target="_blank" rel="noreferrer">
-                        <div>
-                          <strong>{item.title}</strong>
-                          <p>{item.content}</p>
-                        </div>
-                        <span aria-hidden="true">↗</span>
-                      </a>
-                    ))}
-                  </div>
-                )}
-
-                {scan.patch_messages?.map((message) => (
-                  <p className="small-warning" key={message}>⚠ {message}</p>
-                ))}
-
-                {prUrl && (
-                  <div className="pr-success">
-                    <span aria-hidden="true">✓</span>
+                {!scan.verification && <p className="results-empty">Verification evidence has not been reported for this scan.</p>}
+                {existingPrUrl ? (
+                  <div className="action-footer">
                     <div>
-                      <strong>Draft pull request created</strong>
-                      <p>Review the patch and CI checks on GitHub before merging.</p>
+                      <strong>Draft pull request available</strong>
+                      <p>Review the candidate diff and verification evidence on GitHub before merging.</p>
                     </div>
-                    <a href={prUrl} target="_blank" rel="noreferrer">Open PR ↗</a>
+                    <a className="button primary" href={existingPrUrl} target="_blank" rel="noreferrer">View Draft PR <span aria-hidden="true">↗</span></a>
                   </div>
-                )}
-
-                {scan.full_name && patchCount > 0 && (
+                ) : scan.full_name && patchCount > 0 ? (
                   <div className="action-footer">
                     <div>
                       <strong>
-                        {verified
+                        {eligibleForPr
                           ? scan.verification?.regression_tests?.status === 'unavailable'
                             ? 'Ready for human review (regression unverified)'
                             : 'Ready for human review'
-                          : 'Review required before publishing'}
+                          : reviewPrCount > 0 ? 'Review-only Draft PR available' : 'No eligible review-only patches'}
                       </strong>
                       <p>
-                        {verified
+                        {eligibleForPr
                           ? scan.verification?.regression_tests?.status === 'unavailable'
                             ? 'Security verified. A draft PR is ready for human review without automated regression coverage.'
                             : 'A verified patch is ready to publish as a draft PR.'
-                          : 'PR creation stays disabled until isolated tests pass and the static recheck clears.'}
+                          : reviewPrCount > 0
+                            ? `${reviewPrCount} selected candidate(s) can be sent to a DRAFT PR for human review. UNVERIFIED: do not merge without tests. Other candidates are excluded.`
+                            : 'No candidate meets the conservative review-only policy. Verification is still required for standard PRs.'}
                       </p>
                     </div>
                     <button
                       type="button"
                       className="button primary"
                       onClick={createPr}
-                      disabled={!verified || loading !== null || Boolean(prUrl)}
+                      disabled={!canCreatePr || loading !== null}
                     >
-                      {loading === 'pr' ? 'Creating draft PR…' : 'Create draft PR'}
+                      {loading === 'pr' ? 'Creating draft PR…' : eligibleForPr ? 'Create verified draft PR' : 'Create UNVERIFIED review draft'}
                       <span aria-hidden="true">↗</span>
                     </button>
                   </div>
+                ) : (
+                  <p className="results-empty">
+                    {scan.full_name
+                      ? 'Draft PR creation is unavailable for this scan. An eligible candidate and explicit approval are required.'
+                      : 'Draft PR creation is unavailable for in-memory walkthroughs. Connect a GitHub repository to publish review PRs.'}
+                  </p>
                 )}
+                </section>
               </>
             )}
           </section>
-        )}
+        );
+        })()}
 
         <footer className="footer">
           <span>RAKSA © 2026</span>

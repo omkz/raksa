@@ -1,6 +1,7 @@
 import ast
 import hashlib
 import re
+import sys
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -177,6 +178,9 @@ def apply_exact_replacements(files: dict[str, str], patches: list[dict[str, str]
         replaced = updated[path].replace(old, new, 1)
         if replaced == updated[path]:
             raise ValueError(f"Unchanged patch: applying patch produces no source change in {path}.")
+        validation_error = validate_patched_python(path, updated[path], replaced)
+        if validation_error:
+            raise ValueError(validation_error)
         updated[path] = replaced
     return updated
 
@@ -185,6 +189,59 @@ def _safe_relative_path(path: str) -> bool:
     from pathlib import PurePosixPath
     p = PurePosixPath(path)
     return bool(path) and not p.is_absolute() and ".." not in p.parts and "\\" not in path and "\x00" not in path
+
+
+def validate_patched_python(path: str, original: str, patched: str) -> str | None:
+    """Static quality gate for Python proposals; never executes repository code.
+
+    This only checks parseability and newly introduced references to standard-library
+    module objects without a visible binding. It is not a type checker, security
+    verifier, or evidence that runtime behavior is preserved.
+    """
+    if not path.endswith(".py"):
+        return None
+
+    try:
+        patched_tree = ast.parse(patched, filename=path)
+    except SyntaxError as exc:
+        return f"Python syntax error: {exc.msg} (line {exc.lineno}) in {path}."
+
+    try:
+        original_tree = ast.parse(original, filename=path)
+    except SyntaxError:
+        original_tree = ast.Module(body=[], type_ignores=[])
+
+    def module_attribute_roots(tree: ast.AST) -> set[str]:
+        return {
+            node.value.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+        }
+
+    introduced = module_attribute_roots(patched_tree) - module_attribute_roots(original_tree)
+    candidates = introduced & sys.stdlib_module_names
+    if not candidates:
+        return None
+
+    bindings: set[str] = set()
+    for node in ast.walk(patched_tree):
+        if isinstance(node, ast.Import):
+            bindings.update(alias.asname or alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            bindings.update(alias.asname or alias.name for alias in node.names)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            bindings.add(node.id)
+        elif isinstance(node, ast.arg):
+            bindings.add(node.arg)
+
+    missing = sorted(candidates - bindings)
+    if missing:
+        names = ", ".join(missing)
+        return (
+            f"Missing Python module import: new reference(s) to {names} need an "
+            f"explicit import or binding in {path}. Include imports in the patch."
+        )
+    return None
 
 
 def validate_patch_proposal(
@@ -239,7 +296,11 @@ def validate_patch_proposal(
     if replaced == source:
         return None, f"Unchanged patch: applying patch produces no source change in {expected_path}."
 
-    reason = str(proposal.get("reason", "Targeted SQL query remediation"))[:1000]
+    validation_error = validate_patched_python(expected_path, source, replaced)
+    if validation_error:
+        return None, validation_error
+
+    reason = str(proposal.get("reason", "Security remediation proposal"))[:1000]
     return {
         "path": expected_path,
         "old_text": old_text,
