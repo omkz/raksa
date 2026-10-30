@@ -390,6 +390,146 @@ async def test_empty_json_retry_uses_explicit_schema_without_echoing_empty_objec
     assert [message["role"] for message in retry_messages] == [
         "system", "user", "user"
     ]
-    assert "EXACTLY four fields" in retry_messages[-1]["content"]
-    assert "Never return an empty JSON object" in retry_messages[-1]["content"]
+    assert "patch: decision" in retry_messages[-1]["content"]
+    assert "needs_context: decision" in retry_messages[-1]["content"]
+    assert "Do not return {}" in retry_messages[-1]["content"]
     assert "AI abstained after retry" in diagnostics[0]
+
+
+
+@pytest.mark.asyncio
+async def test_generic_patch_decision_accepts_candidate_with_declared_behavior_change() -> None:
+    service = NebiusService()
+    mock_client = MagicMock()
+    source = "function render(node, value) {\n  node.innerHTML = value;\n}\n"
+    candidate = {
+        "decision": "patch",
+        "path": "src/view.js",
+        "old_text": "node.innerHTML = value",
+        "new_text": "node.textContent = value",
+        "reason": "Treat the message as plain text.",
+        "behavior_change": "HTML markup in messages is now displayed literally.",
+        "assumptions": ["The UI expects plain text, not rich HTML."],
+    }
+    mock_client.chat.completions.create = AsyncMock(
+        return_value=MagicMock(
+            choices=[MagicMock(message=MagicMock(content=json.dumps(candidate)))]
+        )
+    )
+    service._client = MagicMock(return_value=mock_client)
+    result = await service.propose_patch(
+        path="src/view.js", source=source,
+        finding={"scanner": "opengrep", "cwe": "CWE-79", "line": 2},
+    )
+    assert result is not None
+    assert result["old_text"] == candidate["old_text"]
+    assert result["new_text"] == candidate["new_text"]
+    assert "Behavior change: HTML markup" in result["reason"]
+    assert "Assumptions: The UI expects plain text" in result["reason"]
+    assert "decision" not in result
+    mock_client.chat.completions.create.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_needs_context_is_not_retried_or_counted_as_patch() -> None:
+    service = NebiusService()
+    mock_client = MagicMock()
+    source = "from flask import request\nx = open(request.args.get('filename')).read()\n"
+    answer = {
+        "decision": "needs_context",
+        "path": "src/unsafe_path.py",
+        "question": "Which directory is authorized for user-selected files?",
+    }
+    mock_client.chat.completions.create = AsyncMock(
+        return_value=MagicMock(
+            choices=[MagicMock(message=MagicMock(content=json.dumps(answer)))]
+        )
+    )
+    service._client = MagicMock(return_value=mock_client)
+    diagnostics: list[str] = []
+    result = await service.propose_patch(
+        path="src/unsafe_path.py", source=source,
+        finding={"scanner": "opengrep", "cwe": "CWE-22", "line": 2},
+        diagnostics=diagnostics,
+    )
+    assert result is None
+    assert len(diagnostics) == 1
+    assert diagnostics[0].startswith("src/unsafe_path.py: AI needs context:")
+    assert "Which directory" in diagnostics[0]
+    mock_client.chat.completions.create.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_explicit_abstain_is_not_retried() -> None:
+    service = NebiusService()
+    mock_client = MagicMock()
+    answer = {
+        "decision": "abstain",
+        "path": "src/unsafe_eval.js",
+        "reason": "No meaningful candidate can be scoped from this snapshot.",
+    }
+    mock_client.chat.completions.create = AsyncMock(
+        return_value=MagicMock(
+            choices=[MagicMock(message=MagicMock(content=json.dumps(answer)))]
+        )
+    )
+    service._client = MagicMock(return_value=mock_client)
+    diagnostics: list[str] = []
+    result = await service.propose_patch(
+        path="src/unsafe_eval.js", source="eval(value)\n",
+        finding={"scanner": "opengrep", "cwe": "CWE-94", "line": 1},
+        diagnostics=diagnostics,
+    )
+    assert result is None
+    assert "AI abstained:" in diagnostics[0]
+    mock_client.chat.completions.create.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_wrong_path_needs_context_decision_is_rejected_and_retried() -> None:
+    service = NebiusService()
+    mock_client = MagicMock()
+    answer = {
+        "decision": "needs_context",
+        "path": "../other.py",
+        "question": "Which root is permitted?",
+    }
+    mock_client.chat.completions.create = AsyncMock(
+        return_value=MagicMock(
+            choices=[MagicMock(message=MagicMock(content=json.dumps(answer)))]
+        )
+    )
+    service._client = MagicMock(return_value=mock_client)
+    diagnostics: list[str] = []
+    result = await service.propose_patch(
+        path="src/unsafe_path.py", source="value = 1\n",
+        finding={"scanner": "opengrep", "cwe": "CWE-22", "line": 1},
+        diagnostics=diagnostics,
+    )
+    assert result is None
+    assert mock_client.chat.completions.create.await_count == 2
+    assert len(diagnostics) == 1
+    assert "Wrong path" in diagnostics[0]
+    assert "AI needs context:" not in diagnostics[0]
+
+
+@pytest.mark.asyncio
+async def test_invalid_decision_is_retried_and_not_counted_as_patch() -> None:
+    service = NebiusService()
+    mock_client = MagicMock()
+    answer = {"decision": "verified", "path": "src/view.js", "reason": "Claims passed"}
+    mock_client.chat.completions.create = AsyncMock(
+        return_value=MagicMock(
+            choices=[MagicMock(message=MagicMock(content=json.dumps(answer)))]
+        )
+    )
+    service._client = MagicMock(return_value=mock_client)
+    diagnostics: list[str] = []
+    result = await service.propose_patch(
+        path="src/view.js", source="const x = 1;\n",
+        finding={"scanner": "opengrep", "cwe": "CWE-79", "line": 1},
+        diagnostics=diagnostics,
+    )
+    assert result is None
+    assert mock_client.chat.completions.create.await_count == 2
+    assert "Invalid decision" in diagnostics[0]
