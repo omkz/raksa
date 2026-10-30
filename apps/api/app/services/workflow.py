@@ -17,6 +17,20 @@ from app.state import JobOwnershipError, complete_job, fail_job, get_job, update
 logger = logging.getLogger("raksa.workflow")
 
 
+def unsafe_shell_replacement(candidate: str) -> bool:
+    """Reject shell-free wrappers that still derive executable selection from input.
+
+    This is a conservative negative filter, not proof that other patches are safe.
+    """
+    return bool(
+        re.search(r"shlex\.split\s*\(", candidate)
+        and re.search(
+            r"subprocess\.(?:run|call|Popen|check_call|check_output)\s*\(",
+            candidate,
+        )
+    )
+
+
 async def run_scan_job(
     scan_id: str,
     installation_id: str,
@@ -149,10 +163,7 @@ async def run_scan_job(
                     # common unsafe transformation rather than counting it as a fix.
                     if str(finding.get("cwe") or "") == "CWE-78":
                         replacement = str(prop.get("new_text") or "")
-                        if (
-                            re.search(r"shlex\.split\s*\(", replacement)
-                            and re.search(r"subprocess\.(?:run|call|Popen|check_call|check_output)\s*\(", replacement)
-                        ):
+                        if unsafe_shell_replacement(replacement):
                             raise ValueError(
                                 "Shell removal alone is insufficient: command selection "
                                 "still comes from input. An explicit trusted command "
