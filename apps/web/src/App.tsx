@@ -265,7 +265,8 @@ export default function App() {
       const result = await api<{ url: string }>('/api/scans/' + scan.id + '/pull-request', {
         method: 'POST',
         body: JSON.stringify({
-          title: `security: remediate potential SQL injection (${scan.full_name})`,
+          review_only: !verified,
+          title: `security: review Raksa candidate fixes (${scan.full_name})`,
           body: `## Summary\nPrepared by Raksa for review.\n\n## Verification evidence\n${scan.verification?.message || 'See attached scan evidence.'}\n\nPlease review the diff and test results carefully before merging.`,
         }),
       });
@@ -282,6 +283,9 @@ export default function App() {
   const patchCount = scan?.patches?.length || 0;
   const verificationStatus = String(scan?.verification?.status || 'not-run');
   const verified = Boolean(scan?.verification?.eligible_for_pr);
+  const reviewPrCount = Array.isArray(scan?.verification?.review_pr_finding_ids)
+    ? scan.verification.review_pr_finding_ids.length : 0;
+  const canCreatePr = verified || reviewPrCount > 0;
   const integrationCount = useMemo(() => Object.values(health?.integrations || {}).filter(Boolean).length, [health]);
 
   if (checkingAuth) {
@@ -1042,23 +1046,25 @@ export default function App() {
                           ? scan.verification?.regression_tests?.status === 'unavailable'
                             ? 'Ready for human review (regression unverified)'
                             : 'Ready for human review'
-                          : 'Review required before publishing'}
+                          : reviewPrCount > 0 ? 'Review-only Draft PR available' : 'No eligible review-only patches'}
                       </strong>
                       <p>
                         {verified
                           ? scan.verification?.regression_tests?.status === 'unavailable'
                             ? 'Security verified. A draft PR is ready for human review without automated regression coverage.'
                             : 'A verified patch is ready to publish as a draft PR.'
-                          : 'PR creation stays disabled until isolated tests pass and the static recheck clears.'}
+                          : reviewPrCount > 0
+                            ? `${reviewPrCount} selected candidate(s) can be sent to a DRAFT PR for human review. UNVERIFIED: do not merge without tests. Other candidates are excluded.`
+                            : 'No candidate meets the conservative review-only policy. Verification is still required for standard PRs.'}
                       </p>
                     </div>
                     <button
                       type="button"
                       className="button primary"
                       onClick={createPr}
-                      disabled={!verified || loading !== null || Boolean(prUrl)}
+                      disabled={!canCreatePr || loading !== null || Boolean(prUrl)}
                     >
-                      {loading === 'pr' ? 'Creating draft PR…' : 'Create draft PR'}
+                      {loading === 'pr' ? 'Creating draft PR…' : verified ? 'Create verified draft PR' : 'Create UNVERIFIED review draft'}
                       <span aria-hidden="true">↗</span>
                     </button>
                   </div>
