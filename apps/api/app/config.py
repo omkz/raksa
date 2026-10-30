@@ -24,7 +24,7 @@ class Settings(BaseSettings):
 
     nebius_api_key: str = ""
     nebius_base_url: str = "https://api.tokenfactory.nebius.com/v1"
-    nebius_model: str = "nvidia/Nemotron-3_5-Lightning"
+    nebius_model: str = "nvidia/nemotron-3-super-120b-a12b"
 
     tavily_api_key: str = ""
     sandbox_provider: str = "demo"
