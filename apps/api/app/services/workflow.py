@@ -275,7 +275,8 @@ async def run_scan_job(
                 "message": (
                     "AI-generated OpenGrep patch proposal(s) require manual review. "
                     "No category-specific differential security or regression verification ran. "
-                    "Draft PR creation is disabled."
+                    "Verified PR creation is disabled. An explicit review-only Draft PR "
+                    "may be available for selected unverified candidates."
                 ),
                 "eligible_for_pr": False,
             }
