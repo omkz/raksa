@@ -125,6 +125,18 @@ function outcomePresentation(status?: string): { label: string; tone: string } {
   };
 }
 
+function verificationCheckPresentation(check: { status?: string; passed?: boolean }): { label: string; tone: string } {
+  const status = check.status;
+  if (status === 'passed') return check.passed === true
+    ? { label: '✓ PASSED', tone: 'good-text' }
+    : { label: '— PASSED STATUS · PASS FLAG NOT CONFIRMED', tone: '' };
+  if (status === 'failed' || status === 'error') return { label: `✕ ${status.toUpperCase()}`, tone: 'bad-text' };
+  // A false passed flag also accompanies not_run, skipped, and unavailable.
+  // Display the actual check state instead of labeling every false flag FAILED.
+  if (status) return { label: `— ${status.replaceAll('_', ' ').toUpperCase()}`, tone: '' };
+  return check.passed === true ? { label: '✓ PASSED', tone: 'good-text' } : { label: '— NOT REPORTED', tone: '' };
+}
+
 function buildProposalNotes(scan: Scan): ProposalNote[] {
   const findings = scan.findings || [];
   const outcomes = scan.verification?.finding_outcomes || {};
@@ -343,6 +355,8 @@ export default function App() {
   };
 
   const proposalNotes = scan ? buildProposalNotes(scan) : [];
+  const diagnosticNotes = proposalNotes.filter((note) => note.messages.length > 0 || note.policyRequested);
+  const existingPrUrl = prUrl || scan?.pull_request_url;
   const findingCount = scan?.findings?.length || 0;
   const patchCount = scan?.patches?.length || 0;
   const verificationStatus = String(scan?.verification?.status || 'not-run');
@@ -775,7 +789,7 @@ export default function App() {
             <div className="section-heading results-heading">
               <div>
                 <span className="section-index">02</span>
-                <h2 id="results-heading">Investigation results &amp; verification</h2>
+                <h2 id="results-heading">Investigation results</h2>
               </div>
               <span className={`result-status ${scan.status === 'failed' ? 'bad' : verified || verificationStatus === 'verified' ? 'good' : 'pending'}`}>
                 <i aria-hidden="true" /> {scan.status === 'failed' ? 'FAILED' : verificationStatus.replaceAll('_', ' ').toUpperCase()}
@@ -817,210 +831,13 @@ export default function App() {
                   </div>
                 </div>
 
-                {scan.findings?.map((finding) => (
-                  <article className="finding-card" key={finding.id}>
-                    <div className="finding-top">
-                      <div className="finding-symbol" aria-hidden="true">!</div>
-                      <div className="finding-title">
-                        <div>
-                          <span className={`severity ${finding.severity}`}>{finding.severity.toUpperCase()}</span>
-                          <span className="finding-cwe">{finding.cwe || 'APPSEC'}</span>
-                          <span className="finding-cwe">{finding.scanner === 'opengrep' ? 'OPENGREP · POTENTIAL' : 'RAKSA AST'}</span>
-                        </div>
-                        <h3>{finding.title}</h3>
-                        <p>{finding.description}</p>
-                        {scan.verification?.finding_outcomes?.[finding.id] && (
-                          <div className="finding-remediation">
-                            <span className={`autopilot-status ${outcomePresentation(scan.verification.finding_outcomes[finding.id].status).tone}`}>
-                              {outcomePresentation(scan.verification.finding_outcomes[finding.id].status).label}
-                            </span>
-                            <span>{scan.verification.finding_outcomes[finding.id].message}</span>
-                          </div>
-                        )}
-                      </div>
-                      <span className={`confidence ${finding.status === 'reproduced' ? 'proven' : ''}`}>
-                        {finding.status === 'reproduced' ? 'REPRODUCED' : `${Math.round(finding.confidence * 100)}% CONFIDENCE`}
-                      </span>
-                    </div>
-                    <div className="finding-evidence">
-                      <div className="evidence-path">
-                        <span aria-hidden="true">⌁</span>
-                        <code>{finding.path}</code>
-                        <span className="line-tag">LINE {finding.line}</span>
-                      </div>
-                      <pre><code>{finding.evidence}</code></pre>
-                    </div>
-                  </article>
-                ))}
-
-                {Array.isArray(scan.verification?.scanner_runs) && scan.verification.scanner_runs.map((runner: { name: string; status: string; finding_count: number; message: string }) => (
-                  <div className="summary-box" key={runner.name}>
-                    <div className="summary-head"><strong>{runner.name.toUpperCase()} SCANNER</strong><small>{runner.status.toUpperCase()}</small></div>
-                    <p>{runner.message} · {runner.finding_count} potential finding(s)</p>
-                  </div>
-                ))}
-
-                {scan.summary && (
-                  <div className="summary-box">
-                    <div className="summary-head">
-                      <span aria-hidden="true">✳</span>
-                      <strong>Model reasoning &amp; analysis</strong>
-                      <small>NEBIUS / NEMOTRON</small>
-                    </div>
-                    <p>{scan.summary}</p>
-                  </div>
-                )}
-
-                {scan.diff && (
-                  <div className="diff-panel">
-                    <div className="diff-header">
-                      <div>
-                        <span className="diff-icon" aria-hidden="true">±</span>
-                        <strong>Proposed code change</strong>
-                      </div>
-                      <span>{patchCount ? `${patchCount} proposed patch${patchCount === 1 ? '' : 'es'}` : 'DEMO DIFF'}</span>
-                    </div>
-                    <pre className="diff-code">
-                      {scan.diff.split('\n').map((line, index) => (
-                        <div
-                          key={`${index}-${line}`}
-                          className={line.startsWith('+') ? 'diff-added' : line.startsWith('-') ? 'diff-removed' : ''}
-                        >
-                          {line || ' '}
-                        </div>
-                      ))}
-                    </pre>
-                    {scan.patches?.map((patch, index) => (
-                      <div className="patch-reason" key={`${patch.path}-${index}`}>
-                        <span>REMEDIATION RATIONALE</span>
-                        <p>{patch.reason}</p>
-                        <small>{patch.path}{patch.cwe ? ` · ${patch.cwe}` : ''}{patch.scanner ? ` · ${patch.scanner}` : ''} · AI PROPOSAL — NOT AUTOMATICALLY VERIFIED</small>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {scan.verification && (
-                  <div className="verification-panel">
-                    <div className="verification-icon" aria-hidden="true">
-                      {verificationStatus === 'verified' ? '✓' : '◷'}
-                    </div>
-                    <div className="verification-copy">
-                      <strong>
-                        {verificationStatus === 'verified'
-                          ? scan.verification.regression_tests?.status === 'skipped'
-                            ? 'Verification gate passed (regression tests skipped)'
-                            : scan.verification.regression_tests?.status === 'unavailable'
-                            ? 'Security verified (regression coverage unavailable)'
-                            : 'Verification gate passed'
-                          : 'Verification not completed'}
-                      </strong>
-                      <p>{String(scan.verification.message || scan.verification.evidence || 'No verification details available.')}</p>
-
-                      {scan.verification.static_recheck && (
-                        <div className="proof-results" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
-                          <div>
-                            <span>STATIC RECHECK</span>
-                            <strong className={scan.verification.static_recheck.passed ? 'good-text' : 'bad-text'}>
-                              {scan.verification.static_recheck.passed ? '✓ PASSED' : '✕ FAILED'}
-                            </strong>
-                            <small>{String(scan.verification.static_recheck.message || '')}</small>
-                          </div>
-                          {scan.verification.security_exploit && (
-                            <div>
-                              <span>SECURITY EXPLOIT TEST</span>
-                              <strong className={scan.verification.security_exploit.passed ? 'good-text' : scan.verification.security_exploit.status === 'unavailable' ? '' : 'bad-text'}>
-                                {scan.verification.security_exploit.passed ? '✓ PASSED' : scan.verification.security_exploit.status === 'unavailable' ? '— UNAVAILABLE' : '✕ FAILED'}
-                              </strong>
-                              <small>{String(scan.verification.security_exploit.message || '')}</small>
-                            </div>
-                          )}
-                          {scan.verification.regression_tests && (
-                            <div>
-                              <span>REGRESSION TESTS</span>
-                              <strong className={scan.verification.regression_tests.status === 'skipped' || scan.verification.regression_tests.status === 'unavailable' ? '' : scan.verification.regression_tests.passed ? 'good-text' : 'bad-text'}>
-                                {scan.verification.regression_tests.status === 'skipped' ? '— SKIPPED' : scan.verification.regression_tests.status === 'unavailable' ? '— UNAVAILABLE' : scan.verification.regression_tests.passed ? '✓ PASSED' : '✕ FAILED'}
-                              </strong>
-                              <small>{String(scan.verification.regression_tests.message || '')}</small>
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-                      {scan.verification.before && scan.verification.after && (
-                        <div className="proof-results">
-                          <div>
-                            <span>BEFORE (VULNERABLE BASELINE)</span>
-                            <strong className="bad-text">
-                              {scan.verification.before.result_count !== undefined
-                                ? `${scan.verification.before.result_count} rows returned`
-                                : scan.verification.before.exploit_reproduced
-                                ? 'Exploit reproduced'
-                                : 'Not reproduced'}
-                            </strong>
-                            <small>{scan.verification.before.exploit_reproduced ? 'Vulnerability triggered successfully' : (scan.verification.before.message || 'Not reproduced')}</small>
-                          </div>
-                          <div>
-                            <span>AFTER (PATCHED CODE)</span>
-                            <strong className="good-text">
-                              {scan.verification.after.result_count !== undefined
-                                ? `${scan.verification.after.result_count} rows returned`
-                                : scan.verification.after.exploit_blocked
-                                ? 'Payload blocked'
-                                : 'Not verified'}
-                            </strong>
-                            <small>{scan.verification.after.exploit_blocked ? 'Payload neutralized via parameterization' : (scan.verification.after.message || 'Not verified')}</small>
-                          </div>
-                        </div>
-                      )}
-
-                      {scan.verification.tests && (
-                        <div className="test-terminal">
-                          <div className="terminal-title">
-                            <span aria-hidden="true" /> SANDBOX TEST OUTPUT <small>{scan.verification.tests.provider || ''}</small>
-                          </div>
-                          <pre>
-                            {String(scan.verification.tests.stdout || '')}
-                            {scan.verification.tests.stderr ? `\n${String(scan.verification.tests.stderr)}` : ''}
-                            {!scan.verification.tests.stdout && !scan.verification.tests.stderr ? String(scan.verification.tests.message || '') : ''}
-                          </pre>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {scan.research && scan.research.length > 0 && (
-                  <div className="research-panel">
-                    <div className="diff-header">
-                      <div>
-                        <span className="diff-icon" aria-hidden="true">↗</span>
-                        <strong>Security research context</strong>
-                      </div>
-                      <span>TAVILY</span>
-                    </div>
-                    {scan.research.map((item) => (
-                      <a className="research-item" key={item.url || item.title} href={item.url || undefined} target="_blank" rel="noreferrer">
-                        <div>
-                          <strong>{item.title}</strong>
-                          <p>{item.content}</p>
-                        </div>
-                        <span aria-hidden="true">↗</span>
-                      </a>
-                    ))}
-                  </div>
-                )}
-
-                {proposalNotes.length > 0 && (
-                  <section className="autopilot-notices" aria-labelledby="autopilot-notes-title">
-                    <div className="autopilot-notices-head">
-                      <div>
-                        <span className="autopilot-eyebrow">REMEDIATION DIAGNOSTICS</span>
-                        <h3 id="autopilot-notes-title">Autopilot review notes</h3>
-                        <p>Per-finding outcomes, acceptance checks, and policy context. Proposed patches remain unverified until security and regression checks pass.</p>
-                      </div>
-                      <span className="autopilot-notes-count">{proposalNotes.filter((note) => note.finding).length} FINDINGS · {scan.patch_messages?.length || 0} DIAGNOSTICS</span>
-                    </div>
+                <nav className="results-nav" aria-label="Investigation result sections">
+                  <a href="#findings"><span>01</span> Findings <b>{findingCount}</b></a>
+                  <a href="#remediation"><span>02</span> Remediation <b>{patchCount} proposed</b></a>
+                  <a href="#verification"><span>03</span> Verification &amp; Pull Request</a>
+                </nav>
+                <section className="results-area" id="findings" aria-labelledby="findings-heading">
+                  <div className="results-area-heading"><span>01</span><div><h3 id="findings-heading">Findings</h3><p>Detection results and final per-finding remediation outcomes.</p></div></div>
                     <div className="autopilot-status-summary" aria-label="Remediation outcome counts">
                       {[...new Set(proposalNotes.filter((note) => note.outcome).map((note) => note.outcome!.status))].map((status) => {
                         const presentation = outcomePresentation(status);
@@ -1031,43 +848,160 @@ export default function App() {
                         );
                       })}
                     </div>
-                    {proposalNotes.map((note) => {
-                      const presentation = outcomePresentation(note.outcome?.status);
+                {scan.findings?.map((finding) => {
+                  const note = proposalNotes.find((item) => item.finding?.id === finding.id);
+                  const presentation = outcomePresentation(note?.outcome?.status);
+                  const patchIndex = scan.patches?.findIndex((patch) => patch.finding_id === finding.id) ?? -1;
+                  const remediationLink = diagnosticNotes.some((item) => item.finding?.id === finding.id)
+                    ? `#remediation-note-${encodeURIComponent(finding.id)}`
+                    : patchIndex >= 0 ? `#patch-${patchIndex}` : '#remediation';
+                  return (
+                  <article className="finding-card" id={`finding-${encodeURIComponent(finding.id)}`} key={finding.id}>
+                    <div className="finding-top">
+                      <div className="finding-symbol" aria-hidden="true">!</div>
+                      <div className="finding-title">
+                        <div>
+                          <span className={`severity ${finding.severity}`}>{finding.severity.toUpperCase()}</span>
+                          <span className="finding-cwe">{finding.cwe || 'APPSEC'}</span>
+                          <span className="finding-cwe">{finding.scanner || 'Scanner not reported'}</span>
+                        </div>
+                        <h4>{finding.title}</h4>
+                        <p>{finding.description}</p>
+                        <div className="finding-remediation">
+                          <span className={`autopilot-status ${presentation.tone}`}>
+                            {note?.outcome ? presentation.label : 'Remediation Not Reported'}
+                          </span>
+                          {note?.outcome?.status === 'patch_proposed' && <span className="autopilot-unverified">UNVERIFIED</span>}
+                          {note?.outcome?.message && <span>{note.outcome.message}</span>}
+                        </div>
+                        {note?.policyRequested && note.messages.filter((message) => message.startsWith(`${finding.path}: AI needs context:`)).map((message, index) => (
+                          <p className="finding-policy-context" key={index}>{message}</p>
+                        ))}
+                        <div className="finding-reference">
+                          <code>ID: {finding.id}</code>
+                          {finding.rule_id && <code>Rule: {finding.rule_id}</code>}
+                          <a href={remediationLink}>Review remediation <span aria-hidden="true">↓</span></a>
+                        </div>
+                      </div>
+                      <div className="finding-detection">
+                        <span className="confidence">{Math.round(finding.confidence * 100)}% Detection Confidence</span>
+                        {finding.status === 'reproduced' && <span className="confidence proven">EXPLOIT REPRODUCED</span>}
+                      </div>
+                    </div>
+                    <div className="finding-evidence">
+                      <div className="evidence-path">
+                        <span aria-hidden="true">⌁</span>
+                        <code>{finding.path}</code>
+                        <span className="line-tag">LINE {finding.line}</span>
+                      </div>
+                      <pre><code>{finding.evidence}</code></pre>
+                    </div>
+                  </article>
+                );
+                })}
+
+                {findingCount === 0 && <p className="results-empty">{scan.status === 'completed' ? 'No findings reported by the configured scanners.' : 'Detection results will appear as the investigation progresses.'}</p>}
+                {Array.isArray(scan.verification?.scanner_runs) && scan.verification.scanner_runs.length > 0 && (
+                  <details className="scanner-details results-disclosure">
+                    <summary>Scanner execution details</summary>
+                {Array.isArray(scan.verification?.scanner_runs) && scan.verification.scanner_runs.map((runner: { name: string; status: string; finding_count: number; message: string }) => (
+                  <div className="summary-box" key={runner.name}>
+                    <div className="summary-head"><strong>{runner.name.toUpperCase()} SCANNER</strong><small>{runner.status.toUpperCase()}</small></div>
+                    <p>{runner.message} · {runner.finding_count} potential finding(s)</p>
+                  </div>
+                ))}
+
+                  </details>
+                )}
+                </section>
+                <section className="results-area" id="remediation" aria-labelledby="remediation-heading">
+                  <div className="results-area-heading"><span>02</span><div><h3 id="remediation-heading">Remediation</h3><p>Review candidate changes, model analysis, and diagnostic history. A proposed patch is not verification evidence.</p></div></div>
+                {scan.summary && (
+                  <details className="summary-box results-disclosure">
+                    <summary className="summary-head">
+                      <span aria-hidden="true">✳</span>
+                      <strong>Model reasoning &amp; analysis</strong>
+                      <small>NEBIUS / NEMOTRON</small>
+                    </summary>
+                    <p>{scan.summary}</p>
+                  </details>
+                )}
+
+                {(scan.diff || patchCount > 0) && (
+                  <div className="diff-panel" id="remediation-diff">
+                    <div className="diff-header">
+                      <div>
+                        <span className="diff-icon" aria-hidden="true">±</span>
+                        <strong>Proposed code changes</strong>
+                      </div>
+                      <span>{patchCount ? `${patchCount} proposed patch${patchCount === 1 ? '' : 'es'}` : 'DEMO DIFF'}</span>
+                    </div>
+                    {scan.diff && <pre className="diff-code">
+                      {scan.diff.split('\n').map((line, index) => (
+                        <div
+                          key={`${index}-${line}`}
+                          className={line.startsWith('+') ? 'diff-added' : line.startsWith('-') ? 'diff-removed' : ''}
+                        >
+                          {line || ' '}
+                        </div>
+                      ))}
+                    </pre>}
+                    {scan.patches?.map((patch, index) => (
+                      <div className="patch-reason" id={`patch-${index}`} key={`${patch.path}-${index}`}>
+                        <span>CANDIDATE RATIONALE · {patch.cwe || 'APPSEC'}</span>
+                        <div className="patch-reference">
+                          <code>{patch.path}</code>
+                          {patch.finding_id && (scan.findings?.some((finding) => finding.id === patch.finding_id)
+                            ? <a href={`#finding-${encodeURIComponent(patch.finding_id)}`}>Finding {patch.finding_id} ↑</a>
+                            : <code>Finding ID: {patch.finding_id}</code>)}
+                        </div>
+                        <p>{patch.reason}</p>
+                        {!scan.diff && (
+                          <details className="patch-source results-disclosure">
+                            <summary>Exact source replacement</summary>
+                            <div className="patch-source-block"><strong>Original source</strong><pre><code>{patch.old_text}</code></pre></div>
+                            <div className="patch-source-block"><strong>Proposed replacement · unverified</strong><pre><code>{patch.new_text}</code></pre></div>
+                          </details>
+                        )}
+                        <small>{patch.scanner || 'AI'} · PROPOSAL — NOT AUTOMATICALLY VERIFIED</small>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {!scan.diff && patchCount === 0 && <p className="results-empty">No candidate code changes were prepared. Review finding outcomes and available diagnostics.</p>}
+                {diagnosticNotes.length > 0 && (
+                  <section className="autopilot-notices" aria-labelledby="autopilot-notes-title">
+                    <div className="autopilot-notices-head">
+                      <div>
+                        <span className="autopilot-eyebrow">POLICY & DIAGNOSTIC HISTORY</span>
+                        <h3 id="autopilot-notes-title">Remediation context & history</h3>
+                        <p>Policy previews and original model diagnostics. Retry history does not change the final finding outcome.</p>
+                      </div>
+                      <span className="autopilot-notes-count">{scan.patch_messages?.length || 0} DIAGNOSTICS</span>
+                    </div>
+                    {diagnosticNotes.map((note) => {
                       const cwe22 = note.policyRequested && note.finding?.cwe === 'CWE-22'
                         && note.finding.scanner === 'opengrep' && !note.patch
                         && scan.status === 'completed' ? note.finding : undefined;
                       return (
-                        <article className="autopilot-notice" key={note.id}>
-                          <div className="autopilot-notice-top">
-                            <div className="autopilot-notice-identity">
-                              <div className="autopilot-notice-meta">
-                                {note.finding?.cwe && <span className="autopilot-cwe">{note.finding.cwe}</span>}
-                                <span className={`autopilot-status ${presentation.tone}`}>{presentation.label}</span>
-                                {note.outcome?.status === 'patch_proposed' && <span className="autopilot-unverified">UNVERIFIED</span>}
-                              </div>
-                              <h4>{note.finding?.title || 'Unassigned proposal diagnostic'}</h4>
-                              {note.finding && (
-                                <div className="autopilot-notice-file">
-                                  <code>{note.finding.path}:{note.finding.line}</code>
-                                  <span>{note.finding.scanner || 'scanner unspecified'} · {note.finding.id}</span>
-                                </div>
-                              )}
-                            </div>
+                        <div className="autopilot-notice" id={note.finding ? `remediation-note-${encodeURIComponent(note.finding.id)}` : undefined} key={note.id}>
+                          <div className="remediation-reference">
+                            {note.finding ? <>
+                              <span className="autopilot-cwe">{note.finding.cwe || 'APPSEC'}</span>
+                              <code>{note.finding.path}:{note.finding.line}</code>
+                              <a href={`#finding-${encodeURIComponent(note.finding.id)}`}>Finding {note.finding.id} ↑</a>
+                            </> : <strong>Unassigned diagnostic</strong>}
                           </div>
-                          {note.outcome?.message && <p className="autopilot-outcome-message">{note.outcome.message}</p>}
+                          {note.policyRequested && <p className="autopilot-outcome-message">Policy context requested. The remediation status remains {outcomePresentation(note.outcome?.status).label}.</p>}
+                          {!note.outcome && note.messages.length > 0 && <p className="autopilot-technical-message">{note.messages[note.messages.length - 1]}</p>}
                           {note.messages.length > 0 && (
-                            <div className="autopilot-diagnostics">
-                              <span className="autopilot-detail-label">{note.policyRequested ? 'Needs Context · policy request' : 'Proposal diagnostics'}</span>
+                            <details className="diagnostic-history">
+                              <summary>Raw diagnostic history <span>{note.messages.length} {note.messages.length === 1 ? 'entry' : 'entries'}</span></summary>
                               {note.messages.map((message, index) => (
                                 <p className="autopilot-technical-message" key={index}>{message}</p>
                               ))}
-                            </div>
-                          )}
-                          {note.patch?.reason && (
-                            <div className="autopilot-diagnostics">
-                              <span className="autopilot-detail-label">Candidate rationale</span>
-                              <p className="autopilot-outcome-message">{note.patch.reason}</p>
-                            </div>
+                            </details>
                           )}
                           {cwe22 && scan.full_name && scan.base_sha && (
                             <form
@@ -1097,7 +1031,7 @@ export default function App() {
                               <small id={`authorized-root-help-${cwe22.id}`}>The scan completes independently of this input. Set the application's authorized directory to request a candidate preview at the pinned commit. Previewing does not publish changes or verify remediation.</small>
                             </form>
                           )}
-                        </article>
+                        </div>
                       );
                     })}
                     <p className="autopilot-notices-foot">Static acceptance is not security verification. Review the diff and security/regression evidence before merging.</p>
@@ -1131,18 +1065,121 @@ export default function App() {
                   </div>
                 )}
 
-                {prUrl && (
-                  <div className="pr-success">
-                    <span aria-hidden="true">✓</span>
-                    <div>
-                      <strong>Draft pull request created</strong>
-                      <p>Review the patch and CI checks on GitHub before merging.</p>
+                {scan.research && scan.research.length > 0 && (
+                  <details className="research-panel results-disclosure">
+                    <summary className="diff-header">
+                      <div>
+                        <span className="diff-icon" aria-hidden="true">↗</span>
+                        <strong>Security research context</strong>
+                      </div>
+                      <span>TAVILY</span>
+                    </summary>
+                    {scan.research.map((item) => (
+                      <a className="research-item" key={item.url || item.title} href={item.url || undefined} target="_blank" rel="noreferrer">
+                        <div>
+                          <strong>{item.title}</strong>
+                          <p>{item.content}</p>
+                        </div>
+                        <span aria-hidden="true">↗</span>
+                      </a>
+                    ))}
+                  </details>
+                )}
+
+                </section>
+                <section className="results-area" id="verification" aria-labelledby="verification-heading">
+                  <div className="results-area-heading"><span>03</span><div><h3 id="verification-heading">Verification &amp; Pull Request</h3><p>Executed checks and publication eligibility. Draft PR creation always requires an explicit action.</p></div></div>
+                {scan.verification && (
+                  <div className="verification-panel">
+                    <div className="verification-icon" aria-hidden="true">
+                      {verificationStatus === 'verified' ? '✓' : '◷'}
                     </div>
-                    <a href={prUrl} target="_blank" rel="noreferrer">Open PR ↗</a>
+                    <div className="verification-copy">
+                      <strong>
+                        {verificationStatus === 'verified'
+                          ? scan.verification.regression_tests?.status === 'skipped'
+                            ? 'Verification gate passed (regression tests skipped)'
+                            : scan.verification.regression_tests?.status === 'unavailable'
+                            ? 'Security verified (regression coverage unavailable)'
+                            : 'Verification gate passed'
+                          : 'Verification not completed'}
+                      </strong>
+                      <p>{String(scan.verification.message || scan.verification.evidence || 'No verification details available.')}</p>
+
+                      {(scan.verification.static_recheck || scan.verification.security_exploit || scan.verification.regression_tests) && (
+                        <div className="proof-results" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(180px, 100%), 1fr))' }}>
+                          {([
+                            ['static_recheck', 'STATIC RECHECK'],
+                            ['security_exploit', 'SECURITY EXPLOIT TEST'],
+                            ['regression_tests', 'REGRESSION TESTS'],
+                          ] as const).map(([key, label]) => {
+                            const check = scan.verification?.[key];
+                            if (!check) return null;
+                            const presentation = verificationCheckPresentation(check);
+                            return (
+                              <div key={key}>
+                                <span>{label}</span>
+                                <strong className={presentation.tone}>{presentation.label}</strong>
+                                <small>{String(check.message || '')}</small>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {scan.verification.before && scan.verification.after && (
+                        <div className="proof-results">
+                          <div>
+                            <span>BEFORE (VULNERABLE BASELINE)</span>
+                            <strong className="bad-text">
+                              {scan.verification.before.result_count !== undefined
+                                ? `${scan.verification.before.result_count} rows returned`
+                                : scan.verification.before.exploit_reproduced
+                                ? 'Exploit reproduced'
+                                : 'Not reproduced'}
+                            </strong>
+                            <small>{scan.verification.before.exploit_reproduced ? 'Vulnerability triggered successfully' : (scan.verification.before.message || 'Not reproduced')}</small>
+                          </div>
+                          <div>
+                            <span>AFTER (PATCHED CODE)</span>
+                            <strong className={scan.verification.after.exploit_blocked ? 'good-text' : ''}>
+                              {scan.verification.after.result_count !== undefined
+                                ? `${scan.verification.after.result_count} rows returned`
+                                : scan.verification.after.exploit_blocked
+                                ? 'Payload blocked'
+                                : 'Not verified'}
+                            </strong>
+                            <small>{scan.verification.after.exploit_blocked ? 'Payload neutralized via parameterization' : (scan.verification.after.message || 'Not verified')}</small>
+                          </div>
+                        </div>
+                      )}
+
+                      {scan.verification.tests && (
+                        <div className="test-terminal">
+                          <div className="terminal-title">
+                            <span aria-hidden="true" /> SANDBOX TEST OUTPUT <small>{scan.verification.tests.provider || ''}</small>
+                          </div>
+                          <pre>
+                            {String(scan.verification.tests.stdout || '')}
+                            {scan.verification.tests.stderr ? `\n${String(scan.verification.tests.stderr)}` : ''}
+                            {!scan.verification.tests.stdout && !scan.verification.tests.stderr ? String(scan.verification.tests.message || '') : ''}
+                          </pre>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 )}
 
-                {scan.full_name && patchCount > 0 && (
+                {!scan.verification && <p className="results-empty">Verification evidence has not been reported for this scan.</p>}
+                {existingPrUrl ? (
+                  <div className="action-footer">
+                    <div>
+                      <strong>Draft pull request available</strong>
+                      <p>Review the candidate diff and verification evidence on GitHub before merging.</p>
+                    </div>
+                    <a className="button primary" href={existingPrUrl} target="_blank" rel="noreferrer">View Draft PR <span aria-hidden="true">↗</span></a>
+                  </div>
+                ) : scan.full_name && patchCount > 0 ? (
                   <div className="action-footer">
                     <div>
                       <strong>
@@ -1166,13 +1203,16 @@ export default function App() {
                       type="button"
                       className="button primary"
                       onClick={createPr}
-                      disabled={!canCreatePr || loading !== null || Boolean(prUrl)}
+                      disabled={!canCreatePr || loading !== null}
                     >
                       {loading === 'pr' ? 'Creating draft PR…' : verified ? 'Create verified draft PR' : 'Create UNVERIFIED review draft'}
                       <span aria-hidden="true">↗</span>
                     </button>
                   </div>
+                ) : (
+                  <p className="results-empty">Draft PR creation is unavailable for this scan. An eligible candidate and explicit approval are required.</p>
                 )}
+                </section>
               </>
             )}
           </section>

@@ -1317,7 +1317,7 @@ h1 em {
   font: 9px 'DM Mono', monospace;
 }
 
-.finding-title h3 {
+.finding-title h4 {
   margin: 8px 0 4px;
   font-size: 14px;
   font-weight: 600;
@@ -2394,3 +2394,311 @@ h1 em {
 .login-shell:not(.login-shell-loading) .login-card{border:1px solid rgba(45,212,191,.2);box-shadow:0 32px 90px rgba(0,0,0,.38)}
 @media(max-width:960px){.login-shell:not(.login-shell-loading){grid-template-columns:minmax(0,1fr);gap:42px;padding:48px 24px}.login-showcase{width:min(100%,640px)}.login-card{justify-self:center}.login-marketing-title{font-size:clamp(44px,8vw,70px)}}
 @media(max-width:520px){.login-shell:not(.login-shell-loading){padding:36px 16px}.login-proof-flow{grid-template-columns:1fr 1fr;gap:8px}.login-proof-step{padding:12px}.login-proof-step small{font-size:11px}.login-card{padding:26px 20px}.login-marketing-title{font-size:44px;letter-spacing:-2px}}
+
+/* Investigation results: one finding index, linked remediation, explicit evidence. */
+.results-nav {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1.35fr;
+  gap: 1px;
+  padding: 1px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--line);
+  overflow: hidden;
+  margin: 22px 0 28px;
+}
+
+.results-nav a {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding: 14px 16px;
+  background: var(--panel-inner);
+  font-size: 12px;
+  line-height: 1.6;
+  font-weight: 600;
+}
+
+.results-nav a:hover {
+  background: var(--panel-elevated);
+  color: var(--purple-light);
+}
+
+.results-nav span,
+.results-nav b {
+  color: var(--text-muted);
+  font: 10px 'DM Mono', monospace;
+}
+
+.results-nav b {
+  margin-left: auto;
+}
+
+.results-area {
+  min-width: 0;
+  padding-top: 4px;
+  margin-bottom: 30px;
+  scroll-margin-top: 24px;
+}
+
+.results-area-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line-strong);
+}
+
+.results-area-heading > span {
+  font: 11px/1.8 'DM Mono', monospace;
+  color: var(--purple-light);
+}
+
+.results-area-heading h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.results-area-heading p,
+.results-empty {
+  margin: 6px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.results-empty {
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-inner);
+}
+
+.results-area > .autopilot-status-summary {
+  padding: 0 0 16px;
+}
+
+.finding-card,
+.autopilot-notice,
+.patch-reason {
+  scroll-margin-top: 24px;
+}
+
+.finding-card:target,
+.autopilot-notice:target,
+.patch-reason:target {
+  outline: 1px solid var(--purple);
+  outline-offset: 2px;
+}
+
+.finding-title > div {
+  flex-wrap: wrap;
+}
+
+.finding-detection {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.finding-detection .confidence {
+  white-space: normal;
+  text-align: right;
+  font-size: 9px;
+  line-height: 1.6;
+}
+
+.finding-title .finding-policy-context {
+  margin-top: 10px;
+  padding-left: 12px;
+  border-left: 2px solid var(--amber-border);
+  color: var(--amber);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.finding-reference,
+.patch-reference,
+.remediation-reference {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  line-height: 1.7;
+}
+
+.finding-reference {
+  margin-top: 12px;
+}
+
+.finding-reference code,
+.patch-reference code,
+.remediation-reference code {
+  color: var(--text-muted);
+  font: 10px/1.7 'DM Mono', monospace;
+}
+
+.finding-reference a,
+.patch-reference a,
+.remediation-reference a {
+  color: var(--purple-light);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.patch-reference {
+  margin-top: 7px;
+}
+
+.results-disclosure > summary,
+.diagnostic-history > summary {
+  cursor: pointer;
+  line-height: 1.7;
+}
+
+.results-disclosure > summary:focus-visible,
+.diagnostic-history > summary:focus-visible {
+  outline: 2px solid var(--purple);
+  outline-offset: 4px;
+}
+
+.results-disclosure > summary::before,
+.diagnostic-history > summary::before {
+  content: '+';
+  color: var(--purple-light);
+  margin-right: 8px;
+  font: 12px 'DM Mono', monospace;
+}
+
+.results-disclosure[open] > summary::before,
+.diagnostic-history[open] > summary::before {
+  content: '−';
+}
+
+.results-disclosure > summary,
+.diagnostic-history > summary {
+  list-style: none;
+}
+
+.results-disclosure > summary::-webkit-details-marker,
+.diagnostic-history > summary::-webkit-details-marker {
+  display: none;
+}
+
+.results-disclosure > summary:hover,
+.diagnostic-history > summary:hover {
+  color: var(--purple-light);
+}
+
+.results-disclosure .summary-head {
+  flex-wrap: wrap;
+}
+
+.scanner-details {
+  margin: 12px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.diagnostic-history {
+  margin-top: 12px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.diagnostic-history summary span {
+  margin-left: 8px;
+  font: 10px 'DM Mono', monospace;
+}
+
+.results-area .evidence-path {
+  flex-wrap: wrap;
+}
+
+.results-area .evidence-path code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.results-area .verification-copy,
+.results-area .verification-panel,
+.results-area .diff-panel {
+  min-width: 0;
+}
+
+@media (max-width: 760px) {
+  .results-nav {
+    grid-template-columns: 1fr;
+  }
+
+  .finding-top {
+    flex-wrap: wrap;
+  }
+
+  .finding-detection {
+    flex: 1 1 100%;
+    flex-direction: row;
+    flex-wrap: wrap;
+    padding-left: 46px;
+  }
+
+  .finding-detection .confidence {
+    text-align: left;
+  }
+
+  .results-area .diff-header {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+}
+
+.finding-title h4,
+.verification-copy,
+.summary-box p {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 680px) {
+  .results-area .verification-panel {
+    flex-direction: column;
+  }
+}
+
+/* Preserve exact patch text when a legacy scan has no aggregate diff. */
+.patch-source {
+  margin-top: 12px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.patch-source-block {
+  min-width: 0;
+  margin-top: 12px;
+}
+
+.patch-source-block > strong {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.patch-source-block pre {
+  max-width: 100%;
+  margin: 0;
+  padding: 12px;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: #090f18;
+  color: var(--text);
+  font: 11px/1.7 'DM Mono', monospace;
+}
