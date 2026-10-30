@@ -6,9 +6,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from app.config import settings
 from app.dependencies import AuthenticatedUser, get_current_user, get_optional_user
 from app.schemas import ContextRemediationRequest, CreatePRRequest, ScanRequest
+from app.services.analyzer import apply_exact_replacements
 from app.services.auth import user_has_workspace_access
 from app.services.demo_proof import FIXED_SNIPPET, VULNERABLE_SNIPPET, run_demo_proof
-from app.services.analyzer import apply_exact_replacements
 from app.services.github_app import GitHubAppError, github_app
 from app.services.nebius import NebiusUnavailable, nebius
 from app.services.job_store import (
