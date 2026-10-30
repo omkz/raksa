@@ -1,4 +1,8 @@
-from app.services.workflow import reviewable_patch, unsafe_semantic_replacement, unsafe_shell_replacement
+from app.services.workflow import (
+    reviewable_patch,
+    unsafe_semantic_replacement,
+    unsafe_shell_replacement,
+)
 
 
 def test_untrusted_command_split_is_rejected() -> None:
