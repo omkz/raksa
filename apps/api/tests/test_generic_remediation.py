@@ -533,3 +533,70 @@ async def test_invalid_decision_is_retried_and_not_counted_as_patch() -> None:
     assert result is None
     assert mock_client.chat.completions.create.await_count == 2
     assert "Invalid decision" in diagnostics[0]
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("diagnostic", "expected"),
+    [
+        (
+            "AI needs context: Which directory is authorized? No patch was applied or verified.",
+            "AI needs a specific security-policy",
+        ),
+        (
+            "AI abstained: No safe candidate is available. No patch was applied or verified.",
+            "AI abstained rather than inventing a fix",
+        ),
+    ],
+)
+async def test_no_patch_decisions_are_not_reported_as_rejections(
+    monkeypatch: pytest.MonkeyPatch, diagnostic: str, expected: str
+) -> None:
+    files = {"src/view.js": "function render(node, value) { node.innerHTML = value; }\n"}
+    finding = SecurityFinding(
+        id="xss-no-patch", title="Potential XSS", severity="medium", path="src/view.js",
+        line=1, evidence="node.innerHTML = value", description="DOM HTML sink",
+        confidence=0.65, scanner="opengrep", rule_id="raksa.javascript-html-injection",
+        cwe="CWE-79",
+    )
+
+    async def fake_propose(
+        *, path: str, source: str, finding: dict[str, Any],
+        diagnostics: list[str] | None = None,
+    ) -> None:
+        if diagnostics is not None:
+            diagnostics.append(f"{path}: {diagnostic}")
+        return None
+
+    fake_nebius = MagicMock()
+    fake_nebius.configured = True
+    fake_nebius.propose_patch = AsyncMock(side_effect=fake_propose)
+    fake_nebius.summarize_findings = AsyncMock(return_value="Potential XSS.")
+    monkeypatch.setattr("app.services.workflow.nebius", fake_nebius)
+    monkeypatch.setattr(
+        "app.services.workflow.github_app.get_snapshot",
+        AsyncMock(return_value=(files, {"default_branch": "main"}, "base123")),
+    )
+    monkeypatch.setattr(
+        "app.services.workflow.scan_snapshot",
+        AsyncMock(return_value=[ScannerResult("opengrep", "completed", [finding])]),
+    )
+    gate = AsyncMock(side_effect=AssertionError("No candidate should be verified"))
+    monkeypatch.setattr("app.services.workflow.verify_remediation", gate)
+
+    scan_id = "test-no-patch-" + expected.replace(" ", "-")[:45]
+    await put_job(scan_id, {
+        "id": scan_id, "status": "queued", "stage": "queued", "message": "Scan queued.",
+        "full_name": "owner/repo", "installation_id": "123",
+    })
+    await run_scan_job(scan_id, "123", "owner/repo")
+    job = await get_job(scan_id)
+
+    assert job is not None and job["status"] == "completed"
+    assert job["patches"] == []
+    assert job["verification"]["status"] == "unverified"
+    assert job["verification"]["eligible_for_pr"] is False
+    assert expected in job["verification"]["message"]
+    assert "Proposal rejected" not in job["verification"]["message"]
+    gate.assert_not_awaited()
