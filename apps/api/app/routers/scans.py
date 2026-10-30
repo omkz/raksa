@@ -8,6 +8,7 @@ from app.dependencies import AuthenticatedUser, get_current_user, get_optional_u
 from app.schemas import ContextRemediationRequest, CreatePRRequest, ScanRequest
 from app.services.analyzer import apply_exact_replacements
 from app.services.auth import user_has_workspace_access
+from app.services.cwe22_verifier import assess_cwe22_candidate
 from app.services.demo_proof import FIXED_SNIPPET, VULNERABLE_SNIPPET, run_demo_proof
 from app.services.github_app import GitHubAppError, github_app
 from app.services.job_store import (
@@ -160,6 +161,22 @@ async def preview_context_remediation(
             patched[path].splitlines(keepends=True),
             fromfile=f"a/{path}", tofile=f"b/{path}",
         ))
+    evidence = (
+        assess_cwe22_candidate(
+            path=path,
+            original=source,
+            patched=patched[path],
+            authorized_root=payload.authorized_root,
+        )
+        if patch is not None else {
+            "status": "unverified",
+            "eligible_for_pr": False,
+            "message": (
+                "No CWE-22 patch candidate was produced. "
+                "Category-specific security and regression tests did not run."
+            ),
+        }
+    )
     decision = (
         "patch" if patch is not None
         else "needs_context" if any("AI needs context:" in d for d in diagnostics)
@@ -185,15 +202,7 @@ async def preview_context_remediation(
             if patch is not None else None
         ),
         "diff": diff, "diagnostics": diagnostics,
-        "verification": {
-            "status": "unverified", "eligible_for_pr": False,
-            "message": (
-                "Developer-policy candidate preview only. Static source checks are "
-                "not proof of CWE-22 mitigation, symlink/race resistance, or regression "
-                "safety. Category-specific security and regression tests were not run. "
-                "No pull request can be created from this preview."
-            ),
-        },
+        "verification": evidence,
     }
 
 
