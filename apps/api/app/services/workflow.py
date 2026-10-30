@@ -31,6 +31,23 @@ def unsafe_shell_replacement(candidate: str) -> bool:
     )
 
 
+def unsafe_semantic_replacement(cwe: str, old: str, new: str) -> str | None:
+    """Reject known unsafe/feature-removing AI patterns; not a general verifier."""
+    if cwe == "CWE-22" and re.search(r"(?:os\.path\.)?basename\s*\(", new):
+        return (
+            "basename() alone does not establish an authorized file boundary. "
+            "A trusted root and file-access policy are required."
+        )
+    if cwe == "CWE-94" and "eval(" in old and re.search(
+        r"throw\s+new\s+Error\s*\(", new
+    ):
+        return (
+            "Replacing eval() with an unconditional throw disables behavior; "
+            "review intended functionality before proposing a fix."
+        )
+    return None
+
+
 def reviewable_patch(proposal: dict[str, str]) -> bool:
     """Narrow allowlist for explicit human-review PRs, never security approval.
 
@@ -194,6 +211,13 @@ async def run_scan_job(
                                 "still comes from input. An explicit trusted command "
                                 "and constrained arguments are required."
                             )
+                    semantic_risk = unsafe_semantic_replacement(
+                        str(finding.get("cwe") or ""),
+                        str(prop.get("old_text") or ""),
+                        str(prop.get("new_text") or ""),
+                    )
+                    if semantic_risk:
+                        raise ValueError(semantic_risk)
                     patched_files = apply_exact_replacements(patched_files, [prop])
                     finding_outcomes[str(finding.get("id") or "")] = {
                         "status": "patch_proposed", "message": "Source-anchored candidate; security verification pending."
