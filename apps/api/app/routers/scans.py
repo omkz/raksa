@@ -223,7 +223,7 @@ async def create_pull_request(
     verification = job.get("verification") or {}
     verified = bool(verification.get("eligible_for_pr"))
     if not verified and not payload.review_only:
-        raise HTTPException(409, "Explicit review-only approval is required for unverified patches.")
+        raise HTTPException(409, "PR creation is disabled for unverified patches without explicit review-only approval.")
     if not verified and not verification.get("review_pr_finding_ids"):
         raise HTTPException(409, "No eligible review-only candidates. Re-scan with the current Raksa version.")
 
