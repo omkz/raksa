@@ -267,7 +267,7 @@ export default function App() {
         body: JSON.stringify({
           review_only: !verified,
           title: `security: review Raksa candidate fixes (${scan.full_name})`,
-          body: `## Summary\nPrepared by Raksa for review.\n\n## Verification evidence\n${scan.verification?.message || 'See attached scan evidence.'}\n\nPlease review the diff and test results carefully before merging.`,
+          body: `## Summary\nPrepared by Raksa for review.\n\n## ${verified ? 'Verification evidence' : 'UNVERIFIED review candidate'}\n${scan.verification?.message || 'See attached scan evidence.'}\n\nPlease review the diff and test results carefully before merging.`,
         }),
       });
       setPrUrl(result.url);

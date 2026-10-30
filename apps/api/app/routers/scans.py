@@ -245,6 +245,7 @@ async def create_pull_request(
         selected = [
             patch for patch in (job.get("patches") or [])
             if patch.get("finding_id") in allowed_ids and reviewable_patch(patch)
+            and (verification.get("finding_outcomes") or {}).get(patch.get("finding_id"), {}).get("status") not in {"rejected", "blocked", "needs_review"}
         ]
         if not selected:
             raise HTTPException(409, "No eligible review-only patches remain.")
@@ -262,7 +263,7 @@ async def create_pull_request(
             )
         except GitHubAppError as exc:
             raise HTTPException(
-                502, "Unable to reload the original GitHub snapshot for this review PR."
+                409 if exc.status_code == 409 else 502, f"Unable to reload the pinned snapshot. {exc}"
             ) from exc
         if snapshot_sha != job["base_sha"]:
             raise HTTPException(409, "GitHub snapshot commit does not match the original scan.")
@@ -300,7 +301,7 @@ async def create_pull_request(
             scan_id=scan_id,
         )
     except GitHubAppError as exc:
-        raise HTTPException(409 if "changed after this scan" in str(exc) else 502, str(exc)) from exc
+        raise HTTPException(409 if exc.status_code == 409 else 502, str(exc)) from exc
 
     await update_job(
         scan_id,
@@ -310,6 +311,7 @@ async def create_pull_request(
     )
     await record_audit_event(
         event_type="pull_request.created",
+        workspace_id=job.get("workspace_id"),
         scan_id=scan_id,
         actor=f"user:{auth.user['login']}",
         details={"html_url": pr.get("html_url"), "branch": pr.get("branch")},

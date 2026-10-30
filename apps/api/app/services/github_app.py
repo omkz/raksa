@@ -23,7 +23,9 @@ IGNORED_PARTS = {
 
 
 class GitHubAppError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status_code: int = 502) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class GitHubAppService:
@@ -59,20 +61,39 @@ class GitHubAppService:
         params: dict[str, Any] | None = None,
         app: bool = False,
     ) -> Any:
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.request(
-                method,
-                f"{self.base_url}{path}",
-                headers=self.auth_headers(token, app=app),
-                json=json,
-                params=params,
-            )
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.request(
+                    method,
+                    f"{self.base_url}{path}",
+                    headers=self.auth_headers(token, app=app),
+                    json=json,
+                    params=params,
+                )
+        except httpx.RequestError as exc:
+            raise GitHubAppError(
+                "GitHub could not be reached. Retry the request; an existing review branch will be checked safely."
+            ) from exc
         if response.status_code >= 400:
-            try:
-                detail = response.json().get("message", response.text)
-            except ValueError:
-                detail = response.text
-            raise GitHubAppError(f"GitHub API returned {response.status_code}: {detail}")
+            status = response.status_code
+            if status == 403 and (response.headers.get("x-ratelimit-remaining") == "0"
+                                  or response.headers.get("retry-after")):
+                detail = "GitHub rate limit reached. Wait before retrying."
+            elif status == 403:
+                detail = (
+                    "GitHub denied access. Check the original installation's repository access, "
+                    "Contents: Read and write and Pull requests: Read and write permissions. "
+                    "An installation owner must approve updated App permissions; repository rules may also block writes."
+                )
+            elif status == 401:
+                detail = "GitHub authentication failed. Reconnect the original installation and check the App credentials."
+            elif status == 404:
+                detail = "GitHub resource unavailable. Check installation repository access and whether the repository or pinned commit still exists."
+            elif status == 422:
+                detail = "GitHub rejected the request. Check for an existing review branch/PR, repository rules, or no remaining changes."
+            else:
+                detail = "GitHub request failed. Retry later or check GitHub service status."
+            raise GitHubAppError(f"GitHub API returned {status}: {detail}", status_code=status)
         if not response.content:
             return {}
         return response.json()
@@ -149,6 +170,8 @@ class GitHubAppService:
         commit = await self._installation_request(
             installation_id, "GET", f"/repos/{full_name}/git/commits/{base_sha}",
         )
+        if commit.get("sha") != base_sha:
+            raise GitHubAppError("GitHub snapshot commit does not match the original scan. Rescan before publishing.", status_code=409)
         tree_sha = str(commit["tree"]["sha"])
         tree_data = await self._installation_request(
             installation_id, "GET", f"/repos/{full_name}/git/trees/{tree_sha}", params={"recursive": "1"},
@@ -159,7 +182,7 @@ class GitHubAppService:
         candidates: list[dict[str, Any]] = []
         for item in tree_data.get("tree", []):
             path = item.get("path", "")
-            if item.get("type") != "blob" or not path or not is_safe_repo_path(path):
+            if item.get("type") != "blob" or item.get("mode") not in {"100644", "100755"} or not path or not is_safe_repo_path(path):
                 continue
             pure_path = PurePosixPath(path)
             if pure_path.suffix.lower() not in SOURCE_SUFFIXES and pure_path.name not in SOURCE_BASENAMES:
@@ -220,11 +243,22 @@ class GitHubAppService:
         )
         current_sha = str(current_ref["object"]["sha"])
         if current_sha != expected_base_sha:
-            raise GitHubAppError("The repository changed after this scan. Rescan the latest default branch before creating a PR.")
+            raise GitHubAppError("The repository changed after this scan. Rescan the latest default branch before creating a PR.", status_code=409)
 
         base_commit = await self._installation_request(
             installation_id, "GET", f"/repos/{full_name}/git/commits/{expected_base_sha}",
         )
+        base_tree = await self._installation_request(
+            installation_id, "GET", f"/repos/{full_name}/git/trees/{base_commit['tree']['sha']}",
+            params={"recursive": "1"},
+        )
+        entries = {item["path"]: item for item in base_tree.get("tree", [])}
+        if base_commit.get("sha") != expected_base_sha or base_tree.get("truncated"):
+            raise GitHubAppError("Cannot validate the pinned repository tree. Rescan before publishing.", status_code=409)
+        for path in files:
+            entry = entries.get(path, {})
+            if not is_safe_repo_path(path) or entry.get("type") != "blob" or entry.get("mode") not in {"100644", "100755"}:
+                raise GitHubAppError("Selected path is not a regular file in the pinned repository.", status_code=409)
         tree_entries: list[dict[str, Any]] = []
         for path, content in files.items():
             if not is_safe_repo_path(path):
@@ -233,7 +267,7 @@ class GitHubAppService:
                 installation_id, "POST", f"/repos/{full_name}/git/blobs",
                 json={"content": content, "encoding": "utf-8"},
             )
-            tree_entries.append({"path": path, "mode": "100644", "type": "blob", "sha": blob["sha"]})
+            tree_entries.append({"path": path, "mode": entries[path]["mode"], "type": "blob", "sha": blob["sha"]})
 
         tree = await self._installation_request(
             installation_id, "POST", f"/repos/{full_name}/git/trees",
@@ -248,14 +282,47 @@ class GitHubAppService:
             },
         )
         branch_name = f"raksa/fix-{scan_id[:12]}"
-        await self._installation_request(
-            installation_id, "POST", f"/repos/{full_name}/git/refs",
-            json={"ref": f"refs/heads/{branch_name}", "sha": commit["sha"]},
+        async def assert_base() -> None:
+            latest_meta = await self.get_repository(installation_id, full_name)
+            latest_ref = await self._installation_request(
+                installation_id, "GET", f"/repos/{full_name}/git/ref/heads/{quote(default_branch, safe='/')}",
+            )
+            if latest_meta.get("default_branch") != default_branch or latest_ref["object"]["sha"] != expected_base_sha:
+                raise GitHubAppError("The repository changed after this scan. Rescan before creating a PR.", status_code=409)
+
+        await assert_base()
+        try:
+            await self._installation_request(
+                installation_id, "POST", f"/repos/{full_name}/git/refs",
+                json={"ref": f"refs/heads/{branch_name}", "sha": commit["sha"]},
+            )
+        except GitHubAppError as exc:
+            if exc.status_code != 422:
+                raise
+            # A previous attempt may have created the branch before PR creation failed.
+            # Never reset or overwrite it: require the exact expected tree and parent.
+            ref = await self._installation_request(
+                installation_id, "GET", f"/repos/{full_name}/git/ref/heads/{branch_name}",
+            )
+            existing = await self._installation_request(
+                installation_id, "GET", f"/repos/{full_name}/git/commits/{ref['object']['sha']}",
+            )
+            if existing.get("tree", {}).get("sha") != tree["sha"] or [p["sha"] for p in existing.get("parents", [])] != [expected_base_sha]:
+                raise GitHubAppError("The review branch was changed. It will not be overwritten. Start a fresh scan.", status_code=409) from exc
+        await assert_base()
+        prs = await self._installation_request(
+            installation_id, "GET", f"/repos/{full_name}/pulls",
+            params={"head": f"{full_name.split('/')[0]}:{branch_name}", "state": "all"},
         )
-        pr = await self._installation_request(
-            installation_id, "POST", f"/repos/{full_name}/pulls",
-            json={"title": title, "body": body, "head": branch_name, "base": default_branch, "draft": True},
-        )
+        if prs:
+            pr = prs[0]
+            if pr.get("state") != "open" or not pr.get("draft") or pr.get("base", {}).get("ref") != default_branch:
+                raise GitHubAppError("The existing review PR is closed or no longer Draft, or its base changed. Start a fresh scan.", status_code=409)
+        else:
+            pr = await self._installation_request(
+                installation_id, "POST", f"/repos/{full_name}/pulls",
+                json={"title": title, "body": body, "head": branch_name, "base": default_branch, "draft": True},
+            )
         return {"number": pr.get("number"), "html_url": pr.get("html_url"), "branch": branch_name}
 
     async def get_pull_request_files(
