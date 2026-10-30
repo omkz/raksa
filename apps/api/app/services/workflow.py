@@ -31,6 +31,31 @@ def unsafe_shell_replacement(candidate: str) -> bool:
     )
 
 
+def reviewable_patch(proposal: dict[str, str]) -> bool:
+    """Narrow allowlist for explicit human-review PRs, never security approval.
+
+    Preserve only source-anchored SQL parameters and text-only DOM output.
+    Other CWE categories require a distinct safety-policy review first.
+    """
+    new = str(proposal.get("new_text") or "")
+    old = str(proposal.get("old_text") or "")
+    cwe = str(proposal.get("cwe") or "")
+    if cwe == "CWE-89":
+        return (
+            "execute(" in new
+            and ("?" in new or "%s" in new or ":" in new)
+            and "execute(" in old
+        )
+    if cwe == "CWE-79":
+        return (
+            "innerHTML" in old
+            and "textContent" in new
+            and "innerHTML" not in new
+            and "eval(" not in new
+        )
+    return False
+
+
 async def run_scan_job(
     scan_id: str,
     installation_id: str,
@@ -289,6 +314,10 @@ async def run_scan_job(
                     finding_outcomes[finding_id] = {
                         "status": "verified", "message": "SQLi verification gate passed."
                     }
+        verification["review_pr_finding_ids"] = [
+            str(proposal["finding_id"]) for proposal in proposals
+            if reviewable_patch(proposal)
+        ]
         verification["finding_outcomes"] = finding_outcomes
         verification["scanner_runs"] = scanner_reports
 
